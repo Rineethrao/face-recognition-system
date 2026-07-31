@@ -130,6 +130,16 @@ class CameraRegistry:
     def get_all_cameras(self) -> List[Dict[str, Any]]:
         return settings.get_cameras()
 
+    def reload_all_recognitions(self):
+        """Notifies all running camera workers to reset track recognition states and immediately re-query FAISS."""
+        with self.lock:
+            for worker in list(self.workers.values()):
+                if hasattr(worker, 'orchestrator') and worker.orchestrator:
+                    try:
+                        worker.orchestrator.reset_track_recognitions()
+                    except Exception as e:
+                        logger.error(f"Error resetting recognitions on worker '{getattr(worker, 'camera_id', 'unknown')}': {e}")
+
     def add_or_update_camera(self, cam_dict: Dict[str, Any]) -> Dict[str, Any]:
         cams = settings.get_cameras()
         cam_id = cam_dict.get("id") or cam_dict.get("camera_id")

@@ -28,32 +28,87 @@ function ConfPill({ sim }: { sim: number }) {
 
 function RecognitionCard({ event }: { event: RecognitionEvent }) {
   const isUnknown = event.person_id === 'unknown'
+  const [imgSrc, setImgSrc] = useState<string>(() =>
+    isUnknown ? '' : `/faces/${event.person_id}/sample_1.jpg`
+  )
+  const [imgError, setImgError] = useState(false)
+
+  const handleImgError = () => {
+    if (imgSrc.endsWith('sample_1.jpg')) {
+      setImgSrc(`/faces/${event.person_id}/uploaded_1.jpg`)
+    } else if (imgSrc.endsWith('uploaded_1.jpg')) {
+      setImgSrc(`/faces/${event.person_id}/snapshot_1.jpg`)
+    } else {
+      setImgError(true)
+    }
+  }
+
+  const pct = Math.round(event.similarity * 100)
 
   return (
-    <div className="rec-card flex gap-3">
+    <div className="rec-card flex items-center gap-3 p-2.5 rounded-xl glass border border-white/5 hover:border-primary-500/30 transition-all">
+      {/* Registered Face Photo Crop / Frame */}
       <div className={clsx(
-        'w-10 h-10 rounded-xl flex items-center justify-center text-sm font-bold flex-shrink-0',
-        isUnknown ? 'bg-red-500/20 text-red-400' : 'bg-primary-500/20 text-primary-400'
+        'w-12 h-12 rounded-xl flex items-center justify-center font-bold text-sm flex-shrink-0 overflow-hidden border relative shadow-md bg-slate-900',
+        isUnknown
+          ? 'border-white/10 text-slate-400'
+          : pct >= 45
+          ? 'border-green-500/50 shadow-green-500/10'
+          : 'border-amber-500/50 shadow-amber-500/10'
       )}>
-        {isUnknown ? '?' : event.name?.[0]?.toUpperCase()}
+        {!isUnknown && !imgError && imgSrc ? (
+          <img
+            src={imgSrc}
+            alt={event.name}
+            onError={handleImgError}
+            className="w-full h-full object-cover"
+          />
+        ) : (
+          <span className={clsx(isUnknown ? 'text-slate-400' : 'text-primary-400')}>
+            {isUnknown ? '?' : (event.name?.[0]?.toUpperCase() || 'U')}
+          </span>
+        )}
+
+        {!isUnknown && (
+          <div className={clsx(
+            'absolute bottom-0 left-0 right-0 text-[7px] font-mono text-center font-bold text-black py-0.2',
+            pct >= 45 ? 'bg-green-400' : 'bg-amber-400'
+          )}>
+            {pct >= 45 ? 'MATCH' : 'POSSIBLE'}
+          </div>
+        )}
       </div>
 
+      {/* Recognized Person Details */}
       <div className="flex-1 min-w-0">
-        <div className="flex items-center justify-between mb-0.5">
-          <span className={clsx('text-sm font-semibold truncate', isUnknown ? 'text-red-400' : 'text-white dark:text-white')}>
+        <div className="flex items-center justify-between gap-1 mb-0.5">
+          <span className={clsx(
+            'text-xs font-bold truncate',
+            isUnknown ? 'text-slate-400' : 'text-white'
+          )}>
             {isUnknown ? 'Unknown Person' : event.name}
           </span>
-          <ConfPill sim={event.similarity} />
+          <span className={clsx(
+            'px-1.5 py-0.5 rounded text-[9px] font-bold font-mono flex-shrink-0',
+            isUnknown
+              ? 'bg-slate-800 text-slate-400'
+              : pct >= 45
+              ? 'bg-green-500/20 text-green-400 border border-green-500/30'
+              : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+          )}>
+            {pct}%
+          </span>
         </div>
-        <div className="text-[10px] text-slate-500 space-y-0.5">
-          <div className="flex items-center gap-1">
-            <CameraIcon className="w-3 h-3" />
-            {event.camera_id || 'Unknown'}
-          </div>
-          <div className="flex items-center gap-1">
-            <Clock className="w-3 h-3" />
-            {event.recognized_at?.split(' ')[1] ?? ''}
-          </div>
+
+        <div className="text-[10px] text-slate-400 flex items-center justify-between">
+          <span className="flex items-center gap-1 truncate text-slate-400">
+            <CameraIcon className="w-3 h-3 text-slate-500 flex-shrink-0" />
+            {event.camera_id || 'cam_02'}
+          </span>
+          <span className="flex items-center gap-1 font-mono text-[9px] text-slate-500 flex-shrink-0">
+            <Clock className="w-3 h-3 text-slate-500 flex-shrink-0" />
+            {event.recognized_at?.split(' ')[1] || event.recognized_at || ''}
+          </span>
         </div>
       </div>
     </div>
@@ -328,45 +383,7 @@ export function LiveRecognition() {
             )}
           </div>
 
-          {/* Active Faces Strip below stream grid — view-only, no registration */}
-          {faces.length > 0 && (
-            <div className="mt-2.5 glass rounded-xl p-3 border border-white/5 flex-shrink-0">
-              <div className="flex items-center justify-between mb-2">
-                <h4 className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
-                  <User className="w-3.5 h-3.5 text-primary-400" />
-                  Live Face Tracks in View
-                </h4>
-                <span className="text-[10px] text-slate-500">{faces.length} faces detected</span>
-              </div>
-              <div className="flex gap-2.5 overflow-x-auto pb-1">
-                {faces.map(f => (
-                  <div
-                    key={f.track_id}
-                    className={clsx(
-                      'flex-shrink-0 flex items-center gap-2 px-2 py-1.5 rounded-xl border transition-all',
-                      f.is_recognized
-                        ? 'border-green-500/30 bg-green-500/10'
-                        : 'border-white/10 bg-navy-800'
-                    )}
-                  >
-                    <img
-                      src={f.crop_base64}
-                      alt="Face"
-                      className="w-8 h-8 rounded-lg object-cover"
-                    />
-                    <div className="text-left">
-                      <div className="text-[10px] font-bold text-white truncate max-w-[64px]">
-                        {f.is_recognized ? f.name : `Track #${f.track_id}`}
-                      </div>
-                      <div className="text-[9px] text-slate-400">
-                        {f.is_recognized ? '✓ Recognized' : 'Unregistered'}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+
         </div>
 
         {/* Right Side — Real-Time Recognition Feed (30%) */}

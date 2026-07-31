@@ -3,7 +3,7 @@ import json
 import threading
 from typing import List, Dict, Any, Tuple
 
-import faiss
+import faiss  # type: ignore # pyright: ignore
 import numpy as np
 
 from app.config import settings
@@ -83,8 +83,32 @@ class FAISSIndexManager:
             return results
 
     def remove_person(self, person_id: str):
-        """Removes mappings and rebuilds the FAISS index to purge deleted vectors completely."""
-        self.rebuild_index()
+        """Removes a person's vectors from memory and rebuilds the FAISS index cleanly, preserving all other people."""
+        with self.lock:
+            new_id_map: Dict[int, Dict[str, Any]] = {}
+            new_cache: Dict[str, List[np.ndarray]] = {}
+            remaining_vectors: List[np.ndarray] = []
+
+            for old_id, info in sorted(self.id_map.items()):
+                if info.get("person_id") != person_id:
+                    emb = info.get("embedding")
+                    if emb:
+                        emb_arr = np.array(emb, dtype=np.float32)
+                        new_faiss_id = len(remaining_vectors)
+                        new_id_map[new_faiss_id] = info
+                        remaining_vectors.append(emb_arr)
+                        new_cache.setdefault(info["person_id"], []).append(emb_arr)
+
+            new_index = faiss.IndexFlatIP(self.dim)
+            if remaining_vectors:
+                embeddings_matrix = np.vstack(remaining_vectors)
+                normalized = l2_normalize(embeddings_matrix).astype(np.float32)
+                new_index.add(normalized)
+
+            self.index = new_index
+            self.id_map = new_id_map
+            self.embeddings_cache = new_cache
+            self.save()
 
     def rebuild_index(self, db_session=None):
         """

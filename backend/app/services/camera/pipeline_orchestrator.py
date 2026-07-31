@@ -577,9 +577,12 @@ class PipelineOrchestrator:
                 )
             except Exception:
                 pass
-            return {"person_id": best_pid, "name": best_name, "similarity": round(best_sim, 4)}
+            return {"person_id": best_pid, "name": best_name, "similarity": round(best_sim, 4), "status": "RECOGNIZED"}
 
-        return {"person_id": "unknown", "name": "Unknown", "similarity": round(best_sim, 4)}
+        elif best_pid and best_sim >= 0.35:
+            return {"person_id": best_pid, "name": best_name, "similarity": round(best_sim, 4), "status": "POSSIBLE_MATCH"}
+
+        return {"person_id": "unknown", "name": "Unknown", "similarity": round(best_sim, 4), "status": "UNKNOWN"}
 
     def _log_event(self, track_id: int, match_info: Dict[str, Any]):
         """Log a recognition event to the database (non-blocking)."""
@@ -643,18 +646,91 @@ class PipelineOrchestrator:
         except Exception as e:
             logger.error(f"[Pipeline:{self.camera_id}] DB log error: {e}")
 
+    def reset_track_recognitions(self):
+        """Resets recognition status on all active tracks so they are immediately re-evaluated against updated FAISS index."""
+        with self._track_lock:
+            for state in self._track_states.values():
+                state.recognition_attempted = False
+                state.final_match = None
+                state.frames_collected = 0
+        self._recognition_event.set()
+
     # ─────────────────────────────────────────────────────────────────────────
     # Overlay Rendering
     # ─────────────────────────────────────────────────────────────────────────
 
     def _draw_overlay(self, frame: np.ndarray, item: Dict[str, Any]):
-        """Draw clean yellow face bounding box only."""
+        """
+        Draws Live Stream Video Face Overlays:
+        1. ANALYZING (Initial Detection) → GRAY Box (160, 160, 160) + Analyzing...
+        2. RECOGNIZED (Registered Person) → GREEN Box (0, 255, 0) + Name & Score
+        3. POSSIBLE_MATCH (Low Confidence) → ORANGE Box (0, 140, 255) + Possible Match
+        4. UNKNOWN (Non-registered Person) → RED Box (0, 0, 255) + Unknown Badge
+        """
         bbox = item.get("bbox")
         if not bbox:
             return
 
         x1, y1, x2, y2 = [int(v) for v in bbox]
-        color = (0, 255, 255)   # Clean Yellow
+        match_info = item.get("match")
 
-        # Bounding box
+        if match_info is None:
+            # 1. Initial Detection / Processing: GRAY Box
+            color = (160, 160, 160)
+            line1 = "Analyzing..."
+            line2 = ""
+            text_color = (255, 255, 255)
+        else:
+            status = match_info.get("status") or ("RECOGNIZED" if match_info.get("person_id") not in (None, "unknown") else "UNKNOWN")
+            name = match_info.get("name", "Unknown")
+            similarity = match_info.get("similarity", 0.0)
+            sim_pct = int(similarity * 100) if similarity <= 1.0 else int(similarity)
+
+            if status == "RECOGNIZED":
+                # 2. High Confidence Recognized: GREEN (BGR: 0, 255, 0)
+                color = (0, 255, 0)
+                line1 = name
+                line2 = f"{sim_pct}%"
+                text_color = (0, 0, 0)
+            elif status == "POSSIBLE_MATCH":
+                # 3. Low Confidence Possible Match: ORANGE (BGR: 0, 140, 255)
+                color = (0, 140, 255)
+                line1 = "Possible Match"
+                line2 = f"{name} ({sim_pct}%)"
+                text_color = (0, 0, 0)
+            else:
+                # 4. Non-Registered Unknown: RED (BGR: 0, 0, 255)
+                color = (0, 0, 255)
+                line1 = "Unknown"
+                line2 = ""
+                text_color = (255, 255, 255)
+
+        # Draw main bounding box (thickness = 2)
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+        # Draw header badge box above top of bounding box
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale1 = 0.50
+        scale2 = 0.40
+
+        (w1, h1), _ = cv2.getTextSize(line1, font, scale1, 1)
+        w2, h2 = (0, 0)
+        if line2:
+            (w2, h2), _ = cv2.getTextSize(line2, font, scale2, 1)
+
+        badge_w = max(w1, w2) + 12
+        badge_h = (h1 + h2 + 10) if line2 else (h1 + 8)
+
+        # Ensure badge stays inside frame boundaries
+        badge_y1 = max(0, y1 - badge_h - 4)
+        badge_y2 = badge_y1 + badge_h
+
+        # Solid badge background
+        cv2.rectangle(frame, (x1, badge_y1), (x1 + badge_w, badge_y2), color, -1)
+
+        # Render Line 1 (Name / Possible Match / Unknown / Analyzing)
+        cv2.putText(frame, line1, (x1 + 6, badge_y1 + h1 + 3), font, scale1, text_color, 1, cv2.LINE_AA)
+
+        # Render Line 2 if present (Percentage / Details)
+        if line2:
+            cv2.putText(frame, line2, (x1 + 6, badge_y1 + h1 + h2 + 7), font, scale2, text_color, 1, cv2.LINE_AA)

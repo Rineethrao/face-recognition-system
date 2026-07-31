@@ -179,6 +179,13 @@ class RegistrationEngine:
             sample_count = len(self.collected_samples)
             logger.info(f"Successfully registered {name} ({person_id}) with {sample_count} face embeddings.")
 
+            # Trigger hot-reload across all running camera workers so all visible faces are re-queried instantly
+            try:
+                from app.services.camera.camera_registry import camera_registry
+                camera_registry.reload_all_recognitions()
+            except Exception as r_err:
+                logger.error(f"Error triggering hot-reload: {r_err}")
+
             self.stop_registration()
             return True, f"Successfully registered person '{name}' ({person_id}) with {sample_count} face samples."
 
@@ -327,6 +334,13 @@ class RegistrationEngine:
                 db.add(emb_record)
 
             db.commit()
+
+            try:
+                from app.services.camera.camera_registry import camera_registry
+                camera_registry.reload_all_recognitions()
+            except Exception as r_err:
+                logger.error(f"Error triggering hot-reload: {r_err}")
+
             return True, f"Successfully registered '{name}' ({person_id}) with {len(collected_embeddings)} face embeddings!", len(collected_embeddings)
         except Exception as e:
             db.rollback()
@@ -524,6 +538,13 @@ class RegistrationEngine:
         try:
             res = self._purge_person_resources_internal(person_id, db)
             db.commit()
+
+            try:
+                from app.services.camera.camera_registry import camera_registry
+                camera_registry.reload_all_recognitions()
+            except Exception as r_err:
+                logger.error(f"Error triggering hot-reload after delete: {r_err}")
+
             return res
         except Exception as e:
             db.rollback()

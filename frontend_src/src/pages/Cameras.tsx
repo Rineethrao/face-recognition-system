@@ -92,11 +92,16 @@ function AddEditCameraWizard({ initial, onSuccess, onClose }: WizardProps) {
     setError(null)
 
     try {
-      if (initial?.id || initial?.camera_id) {
-        const camId = (initial.id || initial.camera_id)!
-        await updateCamera(camId, form)
+      const camId = (initial?.id || initial?.camera_id)
+      const payload: CameraCreatePayload = {
+        ...form,
+        source: undefined // Force backend to construct fresh RTSP URL matching ip_address & credentials
+      }
+
+      if (camId) {
+        await updateCamera(camId, payload)
       } else {
-        await createCamera(form)
+        await createCamera(payload)
       }
       onSuccess()
       onClose()

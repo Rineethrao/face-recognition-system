@@ -35,12 +35,15 @@ router = APIRouter(tags=["Camera Management"])
 
 
 def build_rtsp_url(cam: Any) -> str:
-    """Generates brand-specific RTSP URLs automatically."""
-    # If explicit source is already provided (e.g. webcam index '0' or full URL), use it
-    if hasattr(cam, 'source') and cam.source and (cam.source.startswith("rtsp://") or cam.source.isdigit() or cam.source.startswith("http")):
+    """Generates brand-specific RTSP URLs automatically based on IP address and parameters."""
+    ip = getattr(cam, 'ip_address', None) or ""
+    ip = ip.strip()
+
+    # If no IP address is provided, fallback to raw source (e.g. webcam index '0' or custom stream URL)
+    if not ip and hasattr(cam, 'source') and cam.source:
         return cam.source
 
-    ip = getattr(cam, 'ip_address', None) or "127.0.0.1"
+    ip_val = ip if ip else "127.0.0.1"
     port = getattr(cam, 'port', 554) or 554
     user = getattr(cam, 'username', '') or ''
     password = getattr(cam, 'password', '') or ''
@@ -59,18 +62,18 @@ def build_rtsp_url(cam: Any) -> str:
     stream_num = 1 if stream_type == 'main' else 2
 
     if brand in ["CP Plus", "Dahua", "CP_PLUS"]:
-        return f"rtsp://{auth_part}{ip}:{port}/cam/realmonitor?channel={channel}&subtype={subtype_num}"
+        return f"rtsp://{auth_part}{ip_val}:{port}/cam/realmonitor?channel={channel}&subtype={subtype_num}"
     elif brand == "Hikvision":
-        return f"rtsp://{auth_part}{ip}:{port}/Streaming/Channels/{channel}0{stream_num}"
+        return f"rtsp://{auth_part}{ip_val}:{port}/Streaming/Channels/{channel}0{stream_num}"
     elif brand == "Securus":
-        return f"rtsp://{auth_part}{ip}:{port}/stream{stream_num}"
+        return f"rtsp://{auth_part}{ip_val}:{port}/stream{stream_num}"
     elif brand == "Axis":
         profile = "main" if stream_type == 'main' else "sub"
-        return f"rtsp://{auth_part}{ip}:{port}/axis-media/media.amp?videocodec=h264&streamprofile={profile}"
+        return f"rtsp://{auth_part}{ip_val}:{port}/axis-media/media.amp?videocodec=h264&streamprofile={profile}"
     elif brand == "ONVIF":
-        return f"rtsp://{auth_part}{ip}:{port}/onvif1"
+        return f"rtsp://{auth_part}{ip_val}:{port}/onvif1"
     else: # Custom
-        return f"rtsp://{auth_part}{ip}:{port}/stream{stream_num}"
+        return f"rtsp://{auth_part}{ip_val}:{port}/stream{stream_num}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -123,10 +126,18 @@ def create_or_update_camera(req: CameraCreateRequest):
     """
     cams = get_all_cameras()
 
-    # Generate camera ID if not provided
+    # Generate camera ID if not provided, ensuring no collision with existing IDs
     cam_id = req.camera_id or req.id
     if not cam_id:
-        cam_id = f"cam_{len(cams) + 1:02d}"
+        existing_numbers = []
+        for c in cams:
+            cid = str(c.get("id") or c.get("camera_id") or "")
+            if cid.startswith("cam_"):
+                num_part = cid.replace("cam_", "")
+                if num_part.isdigit():
+                    existing_numbers.append(int(num_part))
+        next_num = (max(existing_numbers) + 1) if existing_numbers else (len(cams) + 1)
+        cam_id = f"cam_{next_num:02d}"
 
     # Check for duplicate names (excluding current camera_id if updating)
     dup_name = next((c for c in cams if c.get("name").lower() == req.name.lower() and c.get("id") != cam_id and c.get("camera_id") != cam_id), None)
@@ -136,7 +147,7 @@ def create_or_update_camera(req: CameraCreateRequest):
             detail=f"A camera named '{req.name}' already exists. Please choose a unique name."
         )
 
-    # Auto-generate RTSP URL
+    # Auto-generate fresh RTSP URL
     rtsp_url = build_rtsp_url(req)
 
     cam_dict = {
