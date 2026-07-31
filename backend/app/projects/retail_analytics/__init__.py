@@ -1,0 +1,1 @@
+from app.projects.retail_analytics.plugin import RetailAnalyticsPlugin

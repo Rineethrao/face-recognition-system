@@ -1,0 +1,88 @@
+{
+  "app": {
+    "name": "Core Face Recognition Engine",
+    "debug": false
+  },
+  "active_project": "office_attendance",
+  "projects": {
+    "office_attendance": {
+      "enabled": false,
+      "log_in_out": true,
+      "cooldown_seconds": 60
+    },
+    "temple_security": {
+      "enabled": false,
+      "alert_webhook": "http://alert-server/api/alert"
+    },
+    "retail_analytics": {
+      "enabled": false
+    }
+  },
+  "database": {
+    "url": "sqlite:///storage/database.db",
+    "faiss_index_path": "storage/embeddings/faiss_index.bin",
+    "faiss_mapping_path": "storage/embeddings/id_mapping.json"
+  },
+  "models": {
+    "detector_path": "Ai-models/det_10g.onnx",
+    "recognition_path": "Ai-models/w600k_r50.onnx"
+  },
+  "storage": {
+    "faces_dir": "storage/faces",
+    "embeddings_dir": "storage/embeddings"
+  },
+  "camera": {
+    "default_source": "0",
+    "frame_width": 1280,
+    "frame_height": 900,
+    "rtsp_buffer_size": 1
+  },
+  "detector": {
+    "input_width": 640,
+    "input_height": 640,
+    "score_threshold": 0.50,
+    "nms_threshold": 0.40,
+    "min_face_size": 20,
+    "detect_person_objects": false
+  },
+
+
+  "quality": {
+    "blur_threshold": 40.0,
+    "min_eye_distance": 10.0,
+    "max_pose_ratio": 0.50,
+    "enhance_enabled": true,
+    "enhance_contrast": true,
+    "enhance_sharpness": true,
+    "enhance_denoise": true
+  },
+  "tracker": {
+    "track_high_thresh": 0.35,
+    "track_low_thresh": 0.10,
+    "new_track_thresh": 0.40,
+    "track_buffer": 30,
+    "match_thresh": 0.80
+  },
+  "recognition": {
+    "embedding_dim": 512,
+    "similarity_threshold": 0.70,
+    "time_window": 3.0
+  },
+
+  "registration": {
+    "sample_count": 5
+  },
+
+  "pipeline": {
+    "capture_fps": 30,
+    "stream_fps": 25,
+    "detection_fps": 8,
+    "recognition_fps": 3,
+    "jpeg_quality": 90,
+    "adaptive_quality": true,
+    "camera_timeout": 10,
+    "reconnect_interval": 5,
+    "max_reconnect_attempts": 20,
+    "gpu_enabled": "auto"
+  }
+}

@@ -1,0 +1,160 @@
+# Implementation Plan — Complete Pipeline Architecture Overhaul
+
+## Problem Diagnosis
+
+Looking at your screenshot and codebase, I can identify **4 root causes** of the corrupted, black, and stuttering stream:
+
+1. **Single Shared Processing Loop** — `detection_service._processing_loop()` reads a frame from `camera_manager`, runs SCRFD + ByteTrack + ArcFace + FAISS, **then** publishes a new annotated frame. The camera capture thread (`stream.py`) and the AI processing loop share the **same `latest_frame` buffer and the same `threading.Lock`**. When ArcFace inference takes 80–400ms (CPU), the lock is held while the camera thread is trying to store a new raw frame. This causes the corrupt/black frames you see.
+
+2. **Frame Corruption via Shared Mutable Buffer** — The annotated frame in `detection_service.latest_annotated_frame` is a **reference to a mutated NumPy array**, not a safe copy. The MJPEG stream generator reads it at the same time the detection loop writes to it, producing torn/partial frames.
+
+3. **No Rate Control on Detection** — Detection (SCRFD) runs on every frame at camera FPS (~15–30 FPS). ArcFace runs inside the same loop. This means the entire pipeline collapses when there are many faces, blocking the stream.
+
+4. **Global Singleton `camera_manager`** — Only one camera uses the global `camera_manager`. Multiple cameras cannot run independently; they share a single stream buffer.
+
+---
+
+## Architecture Overview
+
+```
+[RTSP Camera]
+     │
+     ▼
+[Capture Thread]  ──→  [LatestFrameBuffer]  ──→  [Stream Worker Thread]
+                              │                          │
+                              ▼                          ▼
+                    [Detection Worker]            [MJPEG → Browser]
+                    (SCRFD @ 8 FPS)
+                              │
+                              ▼
+                    [ByteTrack Tracker]
+                    (Every detection)
+                              │
+                              ▼
+                    [RecognitionWorker]
+                    (ArcFace @ async queue)
+                              │
+                              ▼
+                    [Track Cache / Results]
+                              │
+                              ▼
+                    [Overlay Renderer]
+                    (Draws on raw frame copy)
+                              │
+                              ▼
+                    [AnnotatedFrameBuffer]
+```
+
+Every camera owns its own full set of these workers. Isolation is complete.
+
+---
+
+## Proposed Changes
+
+### Component 1: Frame Buffer (New File)
+
+#### [NEW] [frame_buffer.py](file:///c:/face_recognition/backend/app/core/frame_buffer.py)
+- A `LatestFrameBuffer` class using Python's `threading.Event` and a simple `bytes` or `np.ndarray` slot.
+- Thread-safe, **lock-free reads** using atomic reference swap — never blocks the camera thread.
+- Always holds only the most recent frame. Old frames are silently dropped.
+- `put(frame)` — non-blocking, overwrites old frame.
+- `get()` — returns the latest frame (a `.copy()` for safety), or `None` if empty.
+
+---
+
+### Component 2: Capture Thread Rewrite
+
+#### [MODIFY] [stream.py](file:///c:/face_recognition/backend/app/core/stream.py)
+- Remove all locks from the frame-writing path.
+- Write raw frames directly into `LatestFrameBuffer` (atomic swap — zero contention).
+- The corrupt-frame std filter stays to reject gray macroblocks from RTSP.
+- Add configurable `camera_timeout` and auto-reconnect with exponential backoff.
+- Add a public `is_healthy()` method for health monitors.
+
+---
+
+### Component 3: Detection Worker
+
+#### [MODIFY] [pipeline_orchestrator.py](file:///c:/face_recognition/backend/app/services/camera/pipeline_orchestrator.py)
+- Rewrite as a proper **multi-threaded 3-worker pipeline**:
+  - **Thread 1 — Streaming Worker**: Reads from `LatestFrameBuffer` at target `stream_fps` (e.g. 25 FPS). Takes the latest overlay results (non-blocking) and draws bounding boxes on a copy of the raw frame. Writes the annotated frame into `AnnotatedFrameBuffer`. **This thread never calls SCRFD or ArcFace.**
+  - **Thread 2 — Detection Worker**: Reads from `LatestFrameBuffer` at configurable `detection_fps` (e.g. 8 FPS, via throttle sleep). Runs SCRFD detection + ByteTrack. Writes results into a shared `DetectionResultsSlot`.
+  - **Thread 3 — Recognition Worker**: Reads the latest `DetectionResultsSlot` that has unrecognized tracks. Runs `recognition_service.process_tracked_faces()` (ArcFace + FAISS) asynchronously. Updates a `TrackResultsCache` dict (track_id → match).
+- All three threads share **only read-only copies of frames**. No mutable arrays are shared.
+
+---
+
+### Component 4: Camera Worker Isolation
+
+#### [MODIFY] [camera_worker.py](file:///c:/face_recognition/backend/app/services/camera/camera_worker.py)
+- Each camera gets its own `LatestFrameBuffer`, `AnnotatedFrameBuffer`, `DetectionResultsSlot`, and `TrackResultsCache`.
+- Start all 3 workers (Streaming, Detection, Recognition) inside `CameraWorker.start()`.
+- Health monitor in `CameraWorker` periodically checks if all 3 workers are alive, restarting any dead worker independently.
+
+---
+
+### Component 5: MJPEG Stream Endpoint
+
+#### [MODIFY] [camera.py (api)](file:///c:/face_recognition/backend/app/api/camera.py)
+- `generate_mjpeg_stream()` reads from the active camera's `AnnotatedFrameBuffer` instead of `detection_service.get_latest_annotated_frame()`.
+- Implements **adaptive JPEG quality**: starts at quality 90, dynamically reduces to 70 if encoding takes >20ms.
+- Stream loop runs at `stream_fps` defined in `config.json`. Never sleeps longer than `1/stream_fps`.
+- Validates JPEG integrity before yielding (checks for `FFD9` end marker).
+
+---
+
+### Component 6: Config.json & Settings
+
+#### [MODIFY] [config.json](file:///c:/face_recognition/backend/config.json)
+Add the following new config section for full control:
+```json
+"pipeline": {
+  "capture_fps": 30,
+  "stream_fps": 25,
+  "detection_fps": 8,
+  "recognition_fps": 3,
+  "jpeg_quality": 90,
+  "adaptive_quality": true,
+  "camera_timeout": 10,
+  "reconnect_interval": 5,
+  "max_reconnect_attempts": 10,
+  "gpu_enabled": "auto"
+}
+```
+
+#### [MODIFY] [config.py](file:///c:/face_recognition/backend/app/config.py)
+- Load all new pipeline settings from `config.json`.
+- Auto-detect CUDA availability: if `CUDAExecutionProvider` is available, use higher `detection_fps` and `recognition_fps` from GPU defaults.
+
+---
+
+### Component 7: `main.py` Startup
+
+#### [MODIFY] [main.py](file:///c:/face_recognition/backend/app/main.py)
+- Remove the old startup code that manually calls `camera_manager.start()` and `detection_service.start_recognition()`.
+- Replace it with clean startup using the `CameraRegistry` which initializes `CameraWorker` instances per enabled camera.
+- Keep backward compatibility with the legacy single-camera `camera_manager` for any API routes that still reference it.
+
+---
+
+## Order of Execution
+
+1. `frame_buffer.py` — Create new lock-free buffer (foundation)
+2. `stream.py` — Remove lock from frame write path, use `LatestFrameBuffer`
+3. `pipeline_orchestrator.py` — Rewrite with 3-thread pipeline
+4. `camera_worker.py` — Spawn all 3 pipeline threads per camera
+5. `camera.py` (api) — Read from `AnnotatedFrameBuffer`, add adaptive quality
+6. `config.json` + `config.py` — Add pipeline config section
+7. `main.py` — Clean startup via CameraRegistry
+
+## Verification Plan
+
+### Automated
+- Restart server and confirm no startup errors.
+- Open `/video_feed` in browser — stream must be smooth and not frozen.
+
+### Manual Verification
+- Confirm overlay (bounding boxes, names) still appears.
+- Confirm recognition still works and logs events.
+- Introduce artificial CPU load (open another heavy app) — stream must not degrade.
+- Test with the SECURUS camera (`stream2` sub-stream) currently in `cameras.json`.

@@ -1,0 +1,224 @@
+import json
+import os
+from pathlib import Path
+from typing import Any, Dict, List
+
+# BASE_DIR points to backend/ directory (parent of app/)
+BASE_DIR = Path(__file__).resolve().parent.parent
+CONFIG_JSON_PATH = BASE_DIR / "config.json"
+CAMERAS_JSON_PATH = BASE_DIR / "cameras.json"
+
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "app": {
+        "name": "Core Face Recognition Engine",
+        "debug": False
+    },
+    "database": {
+        "url": f"sqlite:///{BASE_DIR / 'storage' / 'database.db'}",
+        "faiss_index_path": "storage/embeddings/faiss_index.bin",
+        "faiss_mapping_path": "storage/embeddings/id_mapping.json"
+    },
+    "models": {
+        "detector_path": "models/det_10g.onnx",
+        "recognition_path": "models/w600k_r50.onnx"
+    },
+    "storage": {
+        "faces_dir": "storage/faces",
+        "embeddings_dir": "storage/embeddings"
+    },
+    "camera": {
+        "default_source": "0",
+        "frame_width": 1280,
+        "frame_height": 720,
+        "rtsp_buffer_size": 1
+    },
+    "detector": {
+        "input_width": 640,
+        "input_height": 640,
+        "score_threshold": 0.30,
+        "nms_threshold": 0.40,
+        "min_face_size": 15
+    },
+    "quality": {
+        "blur_threshold": 40.0,
+        "min_eye_distance": 10.0,
+        "max_pose_ratio": 0.50,
+        "enhance_enabled": True,
+        "enhance_contrast": True,
+        "enhance_sharpness": True,
+        "enhance_denoise": True
+    },
+    "tracker": {
+        "track_high_thresh": 0.35,
+        "track_low_thresh": 0.10,
+        "new_track_thresh": 0.40,
+        "track_buffer": 30,
+        "match_thresh": 0.80
+    },
+    "recognition": {
+        "embedding_dim": 512,
+        "similarity_threshold": 0.45,
+        "time_window": 2.0
+    },
+    "registration": {
+        "sample_count": 5
+    }
+}
+
+class Settings:
+    def __init__(self, json_path: Path = CONFIG_JSON_PATH):
+        self.json_path = json_path
+        self.raw_config = self.load_config()
+
+        # App & Paths
+        self.BASE_DIR: Path = BASE_DIR
+        self.APP_NAME: str = self.raw_config["app"].get("name", "Core Face Recognition Engine")
+
+        self.DEBUG: bool = self.raw_config["app"].get("debug", False)
+
+        # Directory Paths
+        self.STORAGE_DIR: Path = BASE_DIR / "storage"
+        self.FACES_DIR: Path = BASE_DIR / self.raw_config["storage"].get("faces_dir", "storage/faces")
+        self.EMBEDDINGS_DIR: Path = BASE_DIR / self.raw_config["storage"].get("embeddings_dir", "storage/embeddings")
+        self.MODELS_DIR: Path = BASE_DIR / "models"
+
+        # Database & FAISS
+        raw_db_url = self.raw_config["database"].get("url")
+        if not raw_db_url or "storage/database.db" in raw_db_url:
+            self.DATABASE_URL: str = f"sqlite:///{self.STORAGE_DIR / 'database.db'}"
+        else:
+            self.DATABASE_URL: str = raw_db_url
+
+        self.FAISS_INDEX_PATH: Path = BASE_DIR / self.raw_config["database"].get("faiss_index_path", "storage/embeddings/faiss_index.bin")
+        self.FAISS_MAPPING_PATH: Path = BASE_DIR / self.raw_config["database"].get("faiss_mapping_path", "storage/embeddings/id_mapping.json")
+
+        # Models
+        det_path = BASE_DIR / self.raw_config["models"].get("detector_path", "Ai-models/det_10g.onnx")
+        if not det_path.exists():
+            det_path = BASE_DIR / "Ai-models" / "det_10g.onnx"
+        self.DETECTOR_MODEL_PATH: Path = det_path
+
+        rec_path = BASE_DIR / self.raw_config["models"].get("recognition_path", "Ai-models/w600k_r50.onnx")
+        if not rec_path.exists():
+            rec_path = BASE_DIR / "Ai-models" / "w600k_r50.onnx"
+        self.RECOGNITION_MODEL_PATH: Path = rec_path
+
+        # Camera
+        self.DEFAULT_CAMERA_SOURCE: str = str(self.raw_config["camera"].get("default_source", "0"))
+        self.FRAME_WIDTH: int = int(self.raw_config["camera"].get("frame_width", 1280))
+        self.FRAME_HEIGHT: int = int(self.raw_config["camera"].get("frame_height", 720))
+        self.RTSP_BUFFER_SIZE: int = int(self.raw_config["camera"].get("rtsp_buffer_size", 1))
+
+        # Detector
+        det_w = int(self.raw_config["detector"].get("input_width", 640))
+        det_h = int(self.raw_config["detector"].get("input_height", 640))
+        self.DETECTOR_INPUT_SIZE: tuple = (det_w, det_h)
+        self.DET_SCORE_THRESHOLD: float = float(self.raw_config["detector"].get("score_threshold", 0.35))
+        self.DET_NMS_THRESHOLD: float = float(self.raw_config["detector"].get("nms_threshold", 0.40))
+        self.MIN_FACE_SIZE: int = int(self.raw_config["detector"].get("min_face_size", 15))
+
+        # Quality
+        self.QUALITY_BLUR_THRESHOLD: float = float(self.raw_config["quality"].get("blur_threshold", 40.0))
+        self.QUALITY_MIN_EYE_DISTANCE: float = float(self.raw_config["quality"].get("min_eye_distance", 10.0))
+        self.QUALITY_MAX_POSE_RATIO: float = float(self.raw_config["quality"].get("max_pose_ratio", 0.50))
+        self.QUALITY_ENHANCE_ENABLED: bool = bool(self.raw_config["quality"].get("enhance_enabled", True))
+        self.QUALITY_ENHANCE_CONTRAST: bool = bool(self.raw_config["quality"].get("enhance_contrast", True))
+        self.QUALITY_ENHANCE_SHARPNESS: bool = bool(self.raw_config["quality"].get("enhance_sharpness", True))
+        self.QUALITY_ENHANCE_DENOISE: bool = bool(self.raw_config["quality"].get("enhance_denoise", True))
+
+        # Tracker
+        self.TRACK_HIGH_THRESH: float = float(self.raw_config["tracker"].get("track_high_thresh", 0.35))
+        self.TRACK_LOW_THRESH: float = float(self.raw_config["tracker"].get("track_low_thresh", 0.10))
+        self.NEW_TRACK_THRESH: float = float(self.raw_config["tracker"].get("new_track_thresh", 0.40))
+        self.TRACK_BUFFER: int = int(self.raw_config["tracker"].get("track_buffer", 30))
+        self.MATCH_THRESH: float = float(self.raw_config["tracker"].get("match_thresh", 0.80))
+
+        # Recognition
+        self.EMBEDDING_DIM: int = int(self.raw_config["recognition"].get("embedding_dim", 512))
+        self.RECOGNITION_SIMILARITY_THRESHOLD: float = float(self.raw_config["recognition"].get("similarity_threshold", 0.45))
+        self.RECOGNITION_TIME_WINDOW: float = float(self.raw_config["recognition"].get("time_window", 3.0))
+
+        # Registration
+        self.REGISTRATION_SAMPLE_COUNT: int = int(self.raw_config["registration"].get("sample_count", 5))
+
+        # ── Pipeline Configuration ──────────────────────────────────────────
+        _pipeline = self.raw_config.get("pipeline", {})
+
+        self.CAPTURE_FPS: int = int(_pipeline.get("capture_fps", 30))
+        self.STREAM_FPS: int = int(_pipeline.get("stream_fps", 25))
+        self.DETECTION_FPS: int = int(_pipeline.get("detection_fps", 8))
+        self.RECOGNITION_FPS: int = int(_pipeline.get("recognition_fps", 3))
+        self.JPEG_QUALITY: int = int(_pipeline.get("jpeg_quality", 95))
+        self.ADAPTIVE_QUALITY: bool = bool(_pipeline.get("adaptive_quality", True))
+        self.CAMERA_TIMEOUT: int = int(_pipeline.get("camera_timeout", 10))
+        self.RECONNECT_INTERVAL: int = int(_pipeline.get("reconnect_interval", 5))
+        self.MAX_RECONNECT_ATTEMPTS: int = int(_pipeline.get("max_reconnect_attempts", 20))
+
+        # Auto-detect GPU and upgrade FPS targets if CUDA is available
+        gpu_setting = _pipeline.get("gpu_enabled", "auto")
+        self.GPU_ENABLED: bool = self._detect_gpu(gpu_setting)
+        if self.GPU_ENABLED:
+            # GPU can handle higher throughput — boost detection & recognition FPS
+            self.DETECTION_FPS = max(self.DETECTION_FPS, 15)
+            self.STREAM_FPS = max(self.STREAM_FPS, 30)
+
+        # Ensure storage directories exist
+        os.makedirs(self.FACES_DIR, exist_ok=True)
+        os.makedirs(self.EMBEDDINGS_DIR, exist_ok=True)
+
+    @staticmethod
+    def _detect_gpu(setting) -> bool:
+        """Auto-detect CUDA availability or use explicit setting."""
+        if isinstance(setting, bool):
+            return setting
+        if str(setting).lower() == "true":
+            return True
+        if str(setting).lower() == "false":
+            return False
+        # "auto" — check ONNX Runtime providers
+        try:
+            # pyrefly: ignore [missing-import]
+            import onnxruntime as ort
+            providers = ort.get_available_providers()
+            has_cuda = 'CUDAExecutionProvider' in providers
+            if has_cuda:
+                import logging
+                logging.getLogger("Settings").info("CUDA detected — enabling GPU acceleration mode.")
+            return has_cuda
+        except Exception:
+            return False
+
+
+    def load_config(self) -> Dict[str, Any]:
+        if not self.json_path.exists():
+            with open(self.json_path, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_CONFIG, f, indent=2)
+            return DEFAULT_CONFIG
+        try:
+            with open(self.json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data
+        except Exception as e:
+            print(f"[Warning] Failed to load {self.json_path}: {e}. Falling back to default settings.")
+            return DEFAULT_CONFIG
+
+    def get_cameras(self) -> List[Dict[str, Any]]:
+        if not CAMERAS_JSON_PATH.exists():
+            default_cams = [
+                {"id": "cam_01", "name": "Default Camera", "source": self.DEFAULT_CAMERA_SOURCE, "location": "Main Entrance", "enabled": True}
+            ]
+            with open(CAMERAS_JSON_PATH, "w", encoding="utf-8") as f:
+                json.dump(default_cams, f, indent=2)
+            return default_cams
+        try:
+            with open(CAMERAS_JSON_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[Warning] Failed to load cameras.json: {e}")
+            return []
+
+    def save_cameras(self, cameras_list: List[Dict[str, Any]]):
+        with open(CAMERAS_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(cameras_list, f, indent=2)
+
+settings = Settings()

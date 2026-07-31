@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+numpy
+opencv-python
+onnxruntime
+faiss-cpu
+sqlalchemy
+scipy
+websockets
+python-multipart

@@ -1,0 +1,46 @@
+# Python Virtual Environments
+venv/
+backend/venv/
+env/
+.venv/
+
+# Node Modules & Frontend Builds
+node_modules/
+frontend_src/node_modules/
+frontend_src/dist/
+frontend/
+.npm/
+
+# Large AI Models (>100MB, exceeds GitHub file size limit)
+backend/Ai-models/*.onnx
+backend/models/*.onnx
+Ai-models/
+models/
+*.onnx
+*.pt
+*.bin
+*.weights
+*.engine
+*.pth
+
+# Storage & Database Files
+backend/storage/
+storage/
+*.db
+*.sqlite
+*.sqlite3
+
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# System / IDE / Environment
+.DS_Store
+.vscode/
+.idea/
+*.swp
+.env
+.env.local
+*.log
