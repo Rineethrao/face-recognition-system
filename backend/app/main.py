@@ -20,6 +20,8 @@ from app.api.websocket import router as websocket_router
 from app.api.candidate import router as candidate_router
 from app.api.person_gallery import router as person_gallery_router
 from app.api.history import router as history_router
+from app.api.browser_camera import router as browser_camera_router
+from app.api.reports import router as reports_router
 
 # Configure Logging
 logging.basicConfig(
@@ -84,6 +86,22 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing Database Tables...")
     init_db()
 
+    # Copy uploaded logo from artifacts to frontend asset paths
+    try:
+        import shutil
+        logo_src = r"C:\Users\user\.gemini\antigravity-ide\brain\fa62efac-e4b0-45c5-b006-6bd75da1afe9\media__1785665098224.png"
+        if os.path.exists(logo_src):
+            dest1_dir = BASE_DIR.parent / "frontend_src" / "src" / "assets"
+            os.makedirs(dest1_dir, exist_ok=True)
+            shutil.copy2(logo_src, dest1_dir / "logo.png")
+            
+            dest2_dir = BASE_DIR.parent / "frontend" / "assets"
+            os.makedirs(dest2_dir, exist_ok=True)
+            shutil.copy2(logo_src, dest2_dir / "logo.png")
+            logger.info("Successfully copied custom logo to frontend assets.")
+    except Exception as logo_err:
+        logger.error(f"Failed to copy logo: {logo_err}")
+
     # Run self-healing database prune to clean manually deleted files
     try:
         prune_database_orphans()
@@ -132,13 +150,15 @@ async def lifespan(app: FastAPI):
     # ONLY used when no CameraWorker started. Never open the same RTSP source
     # twice — dual VideoCapture on one stream causes FFmpeg SIGSEGV crashes.
     if cameras_started == 0:
-        logger.info("Falling back to legacy single-camera mode.")
         src, name, rotation = resolve_camera_source()
-        logger.info(f"Auto-starting enabled CCTV camera: '{name}' ({src}) | Rotation: {rotation}°")
-        camera_manager.source = camera_manager._parse_source(src)
-        camera_manager.set_rotation(rotation)
-        if camera_manager.start():
-            detection_service.start_recognition()
+        if src and str(src) != "0":
+            logger.info(f"Auto-starting enabled CCTV camera: '{name}' ({src}) | Rotation: {rotation}°")
+            camera_manager.source = camera_manager._parse_source(src)
+            camera_manager.set_rotation(rotation)
+            if camera_manager.start():
+                detection_service.start_recognition()
+        else:
+            logger.info("No enabled RTSP/CCTV streams configured. Webcams will be acquired on-demand by the browser.")
     else:
         logger.info(
             f"CameraWorker pipeline active ({cameras_started} cam(s)). "
@@ -199,6 +219,8 @@ app.include_router(websocket_router)
 app.include_router(candidate_router)
 app.include_router(person_gallery_router)
 app.include_router(history_router)
+app.include_router(browser_camera_router)
+app.include_router(reports_router)
 
 # Serve Plugin Routers
 from app.projects.manager import plugin_manager

@@ -124,9 +124,7 @@ class CameraService:
         enabled = [c for c in cams if c.get("enabled")]
         if enabled:
             return enabled[0]["source"], enabled[0]["name"], int(enabled[0].get("rotation", 0))
-        if cams:
-            return cams[0]["source"], cams[0]["name"], int(cams[0].get("rotation", 0))
-        return settings.DEFAULT_CAMERA_SOURCE, "Default Camera", 0
+        return None, "No Active Camera", 0
 
     def get_all_cameras(self) -> List[Dict[str, Any]]:
         return settings.get_cameras()

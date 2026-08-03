@@ -57,11 +57,47 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "recognition": {
         "embedding_dim": 512,
-        "similarity_threshold": 0.45,
+        "similarity_threshold": 0.55,
         "time_window": 2.0
     },
     "registration": {
-        "sample_count": 5
+        "sample_count": 6,
+        "min_samples": 5,
+        "preferred_samples": 6,
+        "max_samples": 8,
+        "identity_guard_enabled": True,
+        "identity_threshold": 0.60,
+        "target_similarity_threshold": 0.55,
+        "target_reacquire_threshold": 0.60,
+        "duplicate_similarity_threshold": 0.88,
+        "target_lost_timeout": 3.0,
+        "capture_interval": 1.0,
+        "processing_fps": 8,
+        "min_detection_confidence": 0.45,
+        "min_face_width": 45,
+        "min_face_height": 45,
+        "min_sharpness": 18.0,
+        "min_brightness": 25.0,
+        "max_brightness": 235.0,
+        "spatial_weight": 0.20,
+        "identity_weight": 0.70,
+        "confidence_weight": 0.10,
+        "max_reference_embeddings": 5,
+        "frontal_yaw_range": [-0.12, 0.12],
+        "left_yaw_range": [-0.35, -0.12],
+        "right_yaw_range": [0.12, 0.35]
+    },
+    "pipeline": {
+        "capture_fps": 30,
+        "stream_fps": 25,
+        "detection_fps": 8,
+        "recognition_fps": 3,
+        "jpeg_quality": 95,
+        "adaptive_quality": True,
+        "camera_timeout": 10,
+        "reconnect_interval": 5,
+        "max_reconnect_attempts": 20,
+        "gpu_enabled": "auto"
     }
 }
 
@@ -138,8 +174,33 @@ class Settings:
         self.RECOGNITION_SIMILARITY_THRESHOLD: float = float(self.raw_config["recognition"].get("similarity_threshold", 0.45))
         self.RECOGNITION_TIME_WINDOW: float = float(self.raw_config["recognition"].get("time_window", 3.0))
 
-        # Registration
-        self.REGISTRATION_SAMPLE_COUNT: int = int(self.raw_config["registration"].get("sample_count", 5))
+        # Registration (face-first enrollment)
+        _reg = self.raw_config.get("registration", {})
+        self.REGISTRATION_SAMPLE_COUNT: int = int(_reg.get("preferred_samples", _reg.get("sample_count", 6)))
+        self.REGISTRATION_MIN_SAMPLES: int = int(_reg.get("min_samples", 5))
+        self.REGISTRATION_PREFERRED_SAMPLES: int = int(_reg.get("preferred_samples", 6))
+        self.REGISTRATION_MAX_SAMPLES: int = int(_reg.get("max_samples", 8))
+        self.REGISTRATION_IDENTITY_GUARD_ENABLED: bool = bool(_reg.get("identity_guard_enabled", True))
+        self.REGISTRATION_IDENTITY_THRESHOLD: float = float(_reg.get("identity_threshold", 0.60))
+        self.REGISTRATION_TARGET_SIMILARITY_THRESHOLD: float = float(_reg.get("target_similarity_threshold", 0.55))
+        self.REGISTRATION_TARGET_REACQUIRE_THRESHOLD: float = float(_reg.get("target_reacquire_threshold", 0.60))
+        self.REGISTRATION_DUPLICATE_SIMILARITY_THRESHOLD: float = float(_reg.get("duplicate_similarity_threshold", 0.88))
+        self.REGISTRATION_TARGET_LOST_TIMEOUT: float = float(_reg.get("target_lost_timeout", 3.0))
+        self.REGISTRATION_CAPTURE_INTERVAL: float = float(_reg.get("capture_interval", 1.0))
+        self.REGISTRATION_PROCESSING_FPS: int = int(_reg.get("processing_fps", 8))
+        self.REGISTRATION_MIN_DETECTION_CONFIDENCE: float = float(_reg.get("min_detection_confidence", 0.45))
+        self.REGISTRATION_MIN_FACE_WIDTH: int = int(_reg.get("min_face_width", 45))
+        self.REGISTRATION_MIN_FACE_HEIGHT: int = int(_reg.get("min_face_height", 45))
+        self.REGISTRATION_MIN_SHARPNESS: float = float(_reg.get("min_sharpness", 18.0))
+        self.REGISTRATION_MIN_BRIGHTNESS: float = float(_reg.get("min_brightness", 25.0))
+        self.REGISTRATION_MAX_BRIGHTNESS: float = float(_reg.get("max_brightness", 235.0))
+        self.REGISTRATION_SPATIAL_WEIGHT: float = float(_reg.get("spatial_weight", 0.20))
+        self.REGISTRATION_IDENTITY_WEIGHT: float = float(_reg.get("identity_weight", 0.70))
+        self.REGISTRATION_CONFIDENCE_WEIGHT: float = float(_reg.get("confidence_weight", 0.10))
+        self.REGISTRATION_MAX_REFERENCE_EMBEDDINGS: int = int(_reg.get("max_reference_embeddings", 5))
+        self.REGISTRATION_FRONTAL_YAW_RANGE = list(_reg.get("frontal_yaw_range", [-0.12, 0.12]))
+        self.REGISTRATION_LEFT_YAW_RANGE = list(_reg.get("left_yaw_range", [-0.35, -0.12]))
+        self.REGISTRATION_RIGHT_YAW_RANGE = list(_reg.get("right_yaw_range", [0.12, 0.35]))
 
         # ── Pipeline Configuration ──────────────────────────────────────────
         _pipeline = self.raw_config.get("pipeline", {})

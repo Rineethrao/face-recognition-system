@@ -207,25 +207,46 @@ class PipelineOrchestrator:
             last_processed_t = curr_t
 
             # ── Draw overlays (non-blocking read of cached detection results) ──
+            # During ANY active registration, serve a clean stream.
+            # Frontend draws a single face-box layer — never bake boxes into MJPEG.
+            suppress_overlays = False
+            try:
+                from app.services.registration.registration_engine import registration_engine as _reg
+                suppress_overlays = bool(_reg.is_registering)
+            except Exception:
+                pass
+
             annotated = frame  # Start with raw frame (no copy until we draw)
             with self._overlay_lock:
                 overlay_data = list(self._latest_overlay)  # Snapshot
 
-            if overlay_data:
+            if overlay_data and not suppress_overlays:
                 annotated = frame.copy()  # Only copy when we actually need to draw
                 for item in overlay_data:
                     self._draw_overlay(annotated, item)
 
-            # Draw registration banner overlay if active
+            # Subtle registration banner only (no face/person boxes on the stream)
             try:
-                from app.services.registration_service import registration_engine
-                if registration_engine.is_registering:
+                from app.services.registration.registration_engine import registration_engine
+                from app.services.registration.gallery_service import gallery_service
+                if registration_engine.is_registering and (
+                    registration_engine.locked_camera_id in (None, self.camera_id)
+                    or registration_engine.capture_method == "CCTV"
+                ):
                     if annotated is frame:
                         annotated = frame.copy()
-                    overlay_text = f"REGISTRATION: {registration_engine.target_name} ({len(registration_engine.collected_samples)}/{registration_engine.target_samples} samples)"
-                    cv2.rectangle(annotated, (0, 0), (annotated.shape[1], 40), (255, 128, 0), -1)
-                    cv2.putText(annotated, overlay_text, (15, 27),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+                    collected = len(gallery_service.samples)
+                    target_n = registration_engine.target_samples
+                    state = registration_engine.target_state
+                    if state in ("WAITING_FOR_SELECTION", "WAITING_FOR_TARGET"):
+                        overlay_text = "REGISTRATION: Click a face to begin"
+                    elif state in ("TARGET_LOST", "TARGET_TEMPORARILY_LOST"):
+                        overlay_text = "REGISTRATION: Target temporarily lost"
+                    else:
+                        overlay_text = f"REGISTRATION: Capturing {collected}/{target_n}"
+                    cv2.rectangle(annotated, (0, 0), (annotated.shape[1], 36), (30, 90, 200), -1)
+                    cv2.putText(annotated, overlay_text, (15, 24),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
             except Exception:
                 pass
 
@@ -300,16 +321,18 @@ class PipelineOrchestrator:
                 # ── SCRFD Detection ───────────────────────────────────────────
                 detected_faces = detector_engine.detect(frame)
 
-                # Process live registration session if active
-                try:
-                    from app.services.registration_service import registration_engine
-                    if registration_engine.is_registering and detected_faces:
-                        registration_engine.process_frame_registration(frame, detected_faces)
-                except Exception:
-                    pass
-
                 # ── ByteTrack Update ──────────────────────────────────────────
                 tracked_faces = self.tracker.update(detected_faces) if detected_faces else []
+
+                # Process live registration session if active
+                try:
+                    from app.services.registration.registration_engine import registration_engine
+                    from app.services.registration.capture_service import capture_service
+                    if registration_engine.is_registering and tracked_faces:
+                        if not capture_service.active_camera_id or capture_service.active_camera_id == self.camera_id:
+                            registration_engine.process_frame(frame, tracked_faces, method="CCTV")
+                except Exception as reg_err:
+                    logger.debug(f"[Pipeline:{self.camera_id}] Registration frame process: {reg_err}")
 
                 now = time.monotonic()
                 new_unrecognized = False
@@ -426,7 +449,8 @@ class PipelineOrchestrator:
                         rec_sim = final_match.get("similarity", 0.0) if final_match else 0.0
 
                         metadata_list.append({
-                            "track_id": tid,
+                            "track_id": tid,  # internal pipeline continuity only
+                            "detection_id": f"{self.camera_id}_face_{tid}",
                             "bbox": bbox,
                             "blur_score": round(blur, 1),
                             "crop_base64": crop_base64,
@@ -434,10 +458,44 @@ class PipelineOrchestrator:
                             "name": rec_name,
                             "similarity": round(rec_sim, 3),
                             "timestamp": time.strftime("%H:%M:%S"),
+                            "confidence": float(getattr(face, 'score', 0.95)),
+                            "quality": float(round(min(blur / 80.0, 1.0), 2)),
+                            "landmarks": landmarks.tolist() if hasattr(landmarks, 'tolist') else list(landmarks) if landmarks is not None else None,
+                            "camera_id": self.camera_id
                         })
                     except Exception:
                         pass
-                
+
+                # Deduplicate overlapping face boxes before publishing to registration UI
+                deduped = []
+                for item in sorted(
+                    metadata_list,
+                    key=lambda x: float(x.get("confidence", 0) or 0) + float(x.get("quality", 0) or 0),
+                    reverse=True,
+                ):
+                    bb = item.get("bbox") or []
+                    overlap = False
+                    for kept in deduped:
+                        kb = kept.get("bbox") or []
+                        if len(bb) != 4 or len(kb) != 4:
+                            continue
+                        ix1 = max(bb[0], kb[0]); iy1 = max(bb[1], kb[1])
+                        ix2 = min(bb[2], kb[2]); iy2 = min(bb[3], kb[3])
+                        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+                        if inter <= 0:
+                            continue
+                        union = (
+                            max(0.0, bb[2] - bb[0]) * max(0.0, bb[3] - bb[1])
+                            + max(0.0, kb[2] - kb[0]) * max(0.0, kb[3] - kb[1])
+                            - inter
+                        )
+                        if union > 0 and (inter / union) >= 0.40:
+                            overlap = True
+                            break
+                    if not overlap:
+                        deduped.append(item)
+                metadata_list = deduped
+
                 with self._metadata_lock:
                     self._latest_metadata_list = metadata_list
 

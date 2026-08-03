@@ -8,3 +8,4 @@ sqlalchemy
 scipy
 websockets
 python-multipart
+reportlab

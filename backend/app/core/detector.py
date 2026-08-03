@@ -12,7 +12,7 @@ class SCRFDDetector:
     """
     SCRFD Face Detector powered by ONNXRuntime (det_10g.onnx).
     Performs multi-scale face detection and 5-point facial landmark extraction.
-    Shared across cameras — session.run is serialized via `_infer_lock`.
+    Includes OpenCV Haar Cascade fallback for dim/low-light webcams.
     """
     def __init__(
         self,
@@ -47,6 +47,13 @@ class SCRFDDetector:
         input_cfg = self.session.get_inputs()[0]
         self.input_name = input_cfg.name
         self.output_names = [o.name for o in self.session.get_outputs()]
+
+        # Haar Cascade Fallback Classifier
+        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        if os.path.exists(cascade_path):
+            self.haar_cascade = cv2.CascadeClassifier(cascade_path)
+        else:
+            self.haar_cascade = None
 
     def _preprocess(self, image: np.ndarray) -> Tuple[np.ndarray, float, Tuple[int, int]]:
         img_h, img_w = image.shape[:2]
@@ -109,6 +116,32 @@ class SCRFDDetector:
             return []
         return indices.flatten().tolist()
 
+    def _fallback_haar_detect(self, image: np.ndarray) -> List[DetectedFace]:
+        """Backup Haar Cascade detector when SCRFD score is below threshold on dim webcams."""
+        if self.haar_cascade is None:
+            return []
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            faces = self.haar_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(40, 40))
+            results = []
+            for (x, y, w, h) in faces:
+                x1, y1, x2, y2 = float(x), float(y), float(x + w), float(y + h)
+                # Synthesize 5 keypoints from box geometry
+                left_eye = [x1 + w * 0.3, y1 + h * 0.35]
+                right_eye = [x1 + w * 0.7, y1 + h * 0.35]
+                nose = [x1 + w * 0.5, y1 + h * 0.55]
+                left_mouth = [x1 + w * 0.35, y1 + h * 0.75]
+                right_mouth = [x1 + w * 0.65, y1 + h * 0.75]
+
+                results.append(DetectedFace(
+                    bbox=[x1, y1, x2, y2],
+                    score=0.80,
+                    landmarks=[left_eye, right_eye, nose, left_mouth, right_mouth]
+                ))
+            return results
+        except Exception:
+            return []
+
     def detect(self, image: np.ndarray) -> List[DetectedFace]:
         if image is None or image.size == 0:
             return []
@@ -163,7 +196,7 @@ class SCRFDDetector:
                 kpss_list.append(decoded_kpss)
 
         if not scores_list:
-            return []
+            return self._fallback_haar_detect(image)
 
         scores = np.vstack(scores_list).flatten()
         bboxes = np.vstack(bboxes_list)
@@ -171,7 +204,7 @@ class SCRFDDetector:
 
         keep_indices = self._nms(bboxes, scores, conf_thresh)
         if not keep_indices:
-            return []
+            return self._fallback_haar_detect(image)
 
         detected_faces: List[DetectedFace] = []
         img_h, img_w = image.shape[:2]
@@ -200,6 +233,9 @@ class SCRFDDetector:
                 score=score,
                 landmarks=landmarks
             ))
+
+        if not detected_faces:
+            return self._fallback_haar_detect(image)
 
         return detected_faces
 

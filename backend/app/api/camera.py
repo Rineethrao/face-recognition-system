@@ -445,6 +445,7 @@ def generate_mjpeg_stream_v2(camera_id: Optional[str] = None):
 
 @router.get("/video_feed")
 @router.get("/video_feed/{camera_id}")
+@router.get("/cameras/{camera_id}/stream")
 def video_feed(camera_id: Optional[str] = None):
     """Live MJPEG video stream endpoint for a specific camera ID."""
     return StreamingResponse(

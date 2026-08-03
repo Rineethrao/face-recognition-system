@@ -19,20 +19,20 @@ export function Settings() {
       <TopBar title="Settings" />
 
       <div className="flex-1 overflow-y-auto p-6 max-w-2xl mx-auto w-full space-y-6">
-        <div className="glass rounded-2xl p-6 border border-white/5 space-y-6">
-          <div className="flex items-center gap-3 pb-4 border-b border-white/5">
+        <div className="glass rounded-2xl p-6 border border-slate-200 dark:border-white/5 space-y-6">
+          <div className="flex items-center gap-3 pb-4 border-b border-slate-200 dark:border-white/5">
             <div className="w-10 h-10 rounded-xl bg-primary-500/15 text-primary-400 flex items-center justify-center">
               <Sliders className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="font-bold text-white text-lg">Engine Parameters</h2>
-              <p className="text-xs text-slate-400">Configure AI detection, thresholds, and performance</p>
+              <h2 className="font-bold text-slate-900 dark:text-white text-lg">Engine Parameters</h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Configure AI detection, thresholds, and performance</p>
             </div>
           </div>
 
           <div className="space-y-4">
             <div>
-              <label className="text-xs font-medium text-slate-300 mb-1 block">Recognition Similarity Threshold ({similarity})</label>
+              <label className="text-xs font-medium text-slate-700 dark:text-slate-300 mb-1 block">Recognition Similarity Threshold ({similarity})</label>
               <input
                 type="range"
                 min="0.30"
@@ -46,7 +46,7 @@ export function Settings() {
             </div>
 
             <div>
-              <label className="text-xs font-medium text-slate-300 mb-1 block">Target Detection FPS ({detectionFps} FPS)</label>
+              <label className="text-xs font-medium text-slate-700 dark:text-slate-300 mb-1 block">Target Detection FPS ({detectionFps} FPS)</label>
               <input
                 type="range"
                 min="2"
@@ -59,7 +59,7 @@ export function Settings() {
             </div>
 
             <div>
-              <label className="text-xs font-medium text-slate-300 mb-1 block">Face Quality Gate Threshold ({qualityThresh}%)</label>
+              <label className="text-xs font-medium text-slate-700 dark:text-slate-300 mb-1 block">Face Quality Gate Threshold ({qualityThresh}%)</label>
               <input
                 type="range"
                 min="30"

@@ -49,16 +49,17 @@ def get_audit_logs(limit: int = Query(50, ge=1, le=200)):
     """Retrieves system audit logs (registrations, gallery updates, candidate actions)."""
     db = SessionLocal()
     try:
-        logs = db.query(AuditLogModel).order_by(AuditLogModel.timestamp.desc()).limit(limit).all()
+        # NOTE: AuditLogModel only has action/person_id/details/created_at columns.
+        # (Previous version referenced entity_type/entity_id/performed_by/timestamp,
+        # which don't exist on the model and raised an AttributeError on every call.)
+        logs = db.query(AuditLogModel).order_by(AuditLogModel.created_at.desc()).limit(limit).all()
         results = [
             {
                 "id": l.id,
                 "action": l.action,
-                "entity_type": l.entity_type,
-                "entity_id": l.entity_id,
+                "person_id": l.person_id,
                 "details": l.details,
-                "performed_by": l.performed_by,
-                "timestamp": l.timestamp.strftime("%Y-%m-%d %H:%M:%S") if l.timestamp else ""
+                "timestamp": l.created_at.strftime("%Y-%m-%d %H:%M:%S") if l.created_at else ""
             }
             for l in logs
         ]

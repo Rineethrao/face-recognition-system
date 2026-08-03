@@ -1,576 +1,867 @@
-import os
-import cv2
 import base64
 import logging
-import numpy as np
+import time
 from datetime import datetime
-from typing import List, Dict, Tuple, Optional, Any
+from typing import Any, Dict, List, Optional, Tuple
+
+import cv2
+import numpy as np
 
 from app.config import settings
 from app.core.database import SessionLocal
 from app.core.faiss_index import faiss_manager
-from app.core.detector import detector_engine
-from app.core.recognizer import arcface_recognizer
-from app.core.utils import evaluate_face_quality, align_face
 from app.models.db_models import (
-    PersonModel, PersonImageModel, EmbeddingModel,
-    CandidateModel, AuditLogModel, RecognitionLogModel
+    AuditLogModel,
+    EmbeddingModel,
+    PersonImageModel,
+    PersonModel,
 )
 from app.models.schemas import DetectedFace
-
-from app.services.quality.pose_diversity import pose_diversity_engine
+from app.services.registration.capture_service import capture_service
+from app.services.registration.duplicate_service import duplicate_service
+from app.services.registration.embedding_service import embedding_service
+from app.services.registration.gallery_service import gallery_service
+from app.services.registration.pose_service import pose_service
+from app.services.registration.quality_service import quality_service
+from app.services.registration.storage_service import storage_service
 
 logger = logging.getLogger(__name__)
 
+
+def _bbox_iou(a: List[float], b: List[float]) -> float:
+    if not a or not b or len(a) != 4 or len(b) != 4:
+        return 0.0
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return float(inter / union) if union > 0 else 0.0
+
+
+def _bbox_center_distance_norm(a: List[float], b: List[float], frame_wh: Tuple[int, int]) -> float:
+    """Normalized center distance in [0, 1+] where 0 is identical centers."""
+    if not a or not b:
+        return 1.0
+    aw, ah = max(1.0, frame_wh[0]), max(1.0, frame_wh[1])
+    acx, acy = (a[0] + a[2]) / 2.0, (a[1] + a[3]) / 2.0
+    bcx, bcy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+    dist = ((acx - bcx) ** 2 + (acy - bcy) ** 2) ** 0.5
+    diag = (aw ** 2 + ah ** 2) ** 0.5
+    return float(dist / max(diag, 1.0))
+
+
 class RegistrationEngine:
     """
-    Unified Enterprise Person Registration & Gallery Lifecycle Engine.
-    Handles all registration workflows:
-    - Live camera stream sample collection session
-    - Photo file uploads
-    - Live face snapshot crops
-    - Candidate profiles
-    - Person profile updates & deletions
+    Enterprise face-first registration engine.
+
+    CCTV enrollment flow:
+      Face Detection → Operator clicks FACE → Temporary reference embedding
+      → TARGET_LOCKED → Identity association → Quality/Pose/Dedup → Review → Commit
     """
+
     def __init__(self):
         self.is_registering: bool = False
-        self.target_person_id: Optional[str] = None
-        self.target_name: Optional[str] = None
-        self.target_samples: int = settings.REGISTRATION_SAMPLE_COUNT
-        self.collected_samples: List[Dict[str, Any]] = []
+        self.person_id: Optional[str] = None
+        self.person_name: Optional[str] = None
+        self.person_info: Dict[str, Any] = {}
+        self.target_samples: int = settings.REGISTRATION_PREFERRED_SAMPLES
+        self.capture_method: str = "WEBCAM"
+        self.last_ai_assistant: Dict[str, Any] = {
+            "face_detected": False,
+            "centered": False,
+            "sharp": False,
+            "lighting": False,
+            "eyes_visible": False,
+            "identity_verified": False,
+            "guidance": "Position face inside frame",
+            "status": "Ready for capture",
+        }
+        # Face-first session state
+        self.session_id: Optional[str] = None
+        self.target_state: str = "WAITING_FOR_SELECTION"
+        self.target_track_id: Optional[int] = None  # internal continuity only
+        self.locked_camera_id: Optional[str] = None
+        self.target_locked: bool = False
+        self.target_last_seen: Optional[float] = None
+        self.target_face_bbox: Optional[List[float]] = None
+        self.target_thumbnail: Optional[str] = None
+        self.temporary_target_embeddings: List[np.ndarray] = []
+        self.temporary_target_centroid: Optional[np.ndarray] = None
+        self.target_lost_since: Optional[float] = None
+        self.last_capture_time: float = 0.0
+        self.last_target_similarity: float = 0.0
+        self.pose_coverage: Dict[str, bool] = {}
+        self._last_process_ts: float = 0.0
 
-    # --- 1. Live Camera Stream Registration Session ---
-    def start_registration(self, person_id: str, name: str) -> Tuple[bool, str]:
-        """Starts live stream face registration session."""
+    # ── Session lifecycle ────────────────────────────────────────────────────
+
+    def start_session(self, person_id: str, first_name: str, last_name: str, **kwargs) -> Dict[str, Any]:
         self.is_registering = True
-        self.target_person_id = person_id
-        self.target_name = name
-        self.collected_samples.clear()
-        logger.info(f"Started live stream face registration session for Person ID: {person_id}, Name: {name}")
-        return True, f"Registration session started for {name} ({person_id}). Please look directly at the camera."
+        self.session_id = f"reg_{person_id}_{int(datetime.utcnow().timestamp())}"
+        self.person_id = person_id
+        full_name = f"{first_name} {last_name}".strip()
+        self.person_name = full_name
+        self.person_info = {
+            "person_id": person_id,
+            "first_name": first_name,
+            "last_name": last_name,
+            "name": full_name,
+            "employee_id": kwargs.get("employee_id", person_id),
+            "department": kwargs.get("department"),
+            "designation": kwargs.get("designation"),
+            "role": kwargs.get("role", "Employee"),
+            "phone": kwargs.get("phone"),
+            "email": kwargs.get("email"),
+            "notes": kwargs.get("notes"),
+        }
+        self.target_samples = settings.REGISTRATION_PREFERRED_SAMPLES
+        self._reset_target_state()
+        gallery_service.clear()
+        capture_service.unlock_track()
+        logger.info("REG_SESSION_CREATED session=%s person=%s (%s)", self.session_id, full_name, person_id)
+        return {
+            "status": "success",
+            "message": f"Session started for {full_name}",
+            "session_id": self.session_id,
+            "target_samples": self.target_samples,
+        }
 
-    def process_frame_registration(self, frame: np.ndarray, detected_faces: List[DetectedFace]) -> Dict[str, Any]:
-        """Evaluates face frame quality during live stream registration."""
+    def _reset_target_state(self):
+        self.target_state = "WAITING_FOR_SELECTION"
+        self.target_track_id = None
+        self.locked_camera_id = None
+        self.target_locked = False
+        self.target_last_seen = None
+        self.target_face_bbox = None
+        self.target_thumbnail = None
+        self.temporary_target_embeddings = []
+        self.temporary_target_centroid = None
+        self.target_lost_since = None
+        self.last_capture_time = 0.0
+        self.last_target_similarity = 0.0
+        self.pose_coverage = {p: False for p in pose_service.cctv_required_poses()}
+
+    def cancel_session(self) -> Dict[str, Any]:
+        gallery_service.clear()
+        capture_service.unlock_track()
+        self.is_registering = False
+        sid = self.session_id
+        self._reset_target_state()
+        self.session_id = None
+        self.person_id = None
+        self.person_name = None
+        logger.info("REG_SESSION_CANCELLED session=%s", sid)
+        return {"status": "success", "message": "Registration session cancelled"}
+
+    # ── Face selection (click-to-lock) ───────────────────────────────────────
+
+    def select_face(
+        self,
+        frame: np.ndarray,
+        face: Any,
+        camera_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Operator clicked a face. Extract reference embedding and enter TARGET_LOCKED.
+        """
         if not self.is_registering:
-            return {"is_registering": False, "message": "No active registration session."}
+            return {"status": "error", "message": "No active registration session"}
 
-        if len(detected_faces) == 0:
-            return {
-                "is_registering": True,
-                "samples_collected": len(self.collected_samples),
-                "target_samples": self.target_samples,
-                "message": "No face detected in frame. Please center your face."
-            }
+        landmarks = getattr(face, "landmarks", None)
+        if landmarks is None:
+            return {"status": "error", "message": "Selected face has no landmarks"}
 
-        if len(detected_faces) > 1:
-            return {
-                "is_registering": True,
-                "samples_collected": len(self.collected_samples),
-                "target_samples": self.target_samples,
-                "message": "Multiple faces detected! Please ensure only one person is in front of the camera."
-            }
+        aligned = embedding_service.generate_aligned_crop(frame, landmarks)
+        if aligned is None or aligned.size == 0:
+            return {"status": "error", "message": "Could not align selected face"}
 
-        face = detected_faces[0]
-        is_good, reason, blur_score = evaluate_face_quality(frame, face.bbox, face.landmarks)
+        embedding = embedding_service.extract_embedding(aligned)
+        if embedding is None:
+            return {"status": "error", "message": "Could not extract face embedding"}
 
-        if not is_good:
-            return {
-                "is_registering": True,
-                "samples_collected": len(self.collected_samples),
-                "target_samples": self.target_samples,
-                "message": f"Quality Check Failed: {reason}"
-            }
+        # Clear previous capture if re-selecting
+        if self.target_locked and gallery_service.samples:
+            gallery_service.clear()
 
-        landmarks_np = np.array(face.landmarks)
-        aligned_crop = align_face(frame, landmarks_np)
-        embedding = arcface_recognizer.extract_embedding(aligned_crop)
+        self.temporary_target_embeddings = [embedding.copy()]
+        self.temporary_target_centroid = embedding / (np.linalg.norm(embedding) + 1e-8)
+        self.target_face_bbox = [float(v) for v in face.bbox]
+        self.target_track_id = getattr(face, "track_id", None)  # internal continuity hint only
+        self.locked_camera_id = camera_id
+        self.target_locked = True
+        self.target_state = "TARGET_LOCKED"
+        self.capture_method = "CCTV"
+        self.target_lost_since = None
+        self.target_last_seen = time.time()
+        self.last_target_similarity = 1.0
+        self.pose_coverage = {p: False for p in pose_service.cctv_required_poses()}
 
-        self.collected_samples.append({
-            "frame": frame.copy(),
-            "aligned": aligned_crop.copy(),
-            "embedding": embedding
-        })
+        capture_service.lock_face(camera_id=camera_id, internal_track_id=self.target_track_id)
 
-        collected_count = len(self.collected_samples)
-        logger.info(f"Captured registration sample {collected_count}/{self.target_samples} for {self.target_person_id}")
+        ret_enc, buf = cv2.imencode(".jpg", aligned)
+        if ret_enc:
+            self.target_thumbnail = "data:image/jpeg;base64," + base64.b64encode(buf).decode("utf-8")
 
-        if collected_count >= self.target_samples:
-            return {
-                "is_registering": True,
-                "samples_collected": collected_count,
-                "target_samples": self.target_samples,
-                "ready_to_save": True,
-                "message": f"Collected all {self.target_samples} required quality samples! Ready to save."
-            }
+        logger.info(
+            "FACE_SELECTED camera=%s bbox=%s TARGET_LOCKED",
+            camera_id,
+            self.target_face_bbox,
+        )
+        return {
+            "status": "success",
+            "message": "Face selected. Target locked.",
+            "state": self.target_state,
+            "target": self._target_payload(visible=True, identity_verified=True),
+        }
+
+    def unlock_target(self) -> Dict[str, Any]:
+        self._reset_target_state()
+        capture_service.unlock_track()
+        logger.info("REG_TARGET_UNLOCKED")
+        return {"status": "success", "message": "Target unlocked", "state": self.target_state}
+
+    # ── Target association ───────────────────────────────────────────────────
+
+    def _similarity_to_reference(self, embedding: np.ndarray) -> float:
+        if self.temporary_target_centroid is None:
+            return -1.0
+        return float(np.dot(embedding, self.temporary_target_centroid))
+
+    def _association_score(
+        self,
+        identity_sim: float,
+        face_bbox: List[float],
+        detection_conf: float,
+        frame_shape: Tuple[int, int],
+    ) -> float:
+        """Identity-primary association score with spatial continuity support."""
+        w_id = settings.REGISTRATION_IDENTITY_WEIGHT
+        w_sp = settings.REGISTRATION_SPATIAL_WEIGHT
+        w_cf = settings.REGISTRATION_CONFIDENCE_WEIGHT
+
+        spatial = 0.0
+        if self.target_face_bbox is not None:
+            iou = _bbox_iou(face_bbox, self.target_face_bbox)
+            dist = _bbox_center_distance_norm(
+                face_bbox, self.target_face_bbox, (frame_shape[1], frame_shape[0])
+            )
+            spatial = 0.6 * iou + 0.4 * max(0.0, 1.0 - dist * 4.0)
+
+        conf = max(0.0, min(1.0, float(detection_conf)))
+        return float(w_id * identity_sim + w_sp * spatial + w_cf * conf)
+
+    def _find_target_face(
+        self, frame: np.ndarray, detected_faces: List[Any]
+    ) -> Tuple[Optional[Any], Optional[np.ndarray], Optional[np.ndarray], float]:
+        """
+        Find the locked target among detected faces using embedding similarity
+        as the primary signal. Spatial continuity is supporting only.
+        Returns (face, aligned_crop, embedding, identity_similarity).
+        """
+        if self.temporary_target_centroid is None or not detected_faces:
+            return None, None, None, -1.0
+
+        best_face = None
+        best_aligned = None
+        best_emb = None
+        best_score = -1.0
+        best_sim = -1.0
+        min_conf = settings.REGISTRATION_MIN_DETECTION_CONFIDENCE
+
+        for face in detected_faces:
+            conf = float(getattr(face, "score", 0.95))
+            if conf < min_conf:
+                continue
+            landmarks = getattr(face, "landmarks", None)
+            if landmarks is None:
+                continue
+            bbox = [float(v) for v in face.bbox]
+            fw = bbox[2] - bbox[0]
+            fh = bbox[3] - bbox[1]
+            if fw < settings.REGISTRATION_MIN_FACE_WIDTH or fh < settings.REGISTRATION_MIN_FACE_HEIGHT:
+                continue
+
+            aligned = embedding_service.generate_aligned_crop(frame, landmarks)
+            if aligned is None or aligned.size == 0:
+                continue
+            emb = embedding_service.extract_embedding(aligned)
+            if emb is None:
+                continue
+
+            sim = self._similarity_to_reference(emb)
+            score = self._association_score(sim, bbox, conf, frame.shape[:2])
+            if score > best_score:
+                best_score = score
+                best_sim = sim
+                best_face = face
+                best_aligned = aligned
+                best_emb = emb
+
+        # Identity confidence gate — never accept spatial-only matches
+        threshold = (
+            settings.REGISTRATION_TARGET_REACQUIRE_THRESHOLD
+            if self.target_state == "TARGET_LOST"
+            else settings.REGISTRATION_TARGET_SIMILARITY_THRESHOLD
+        )
+        if best_face is None or best_sim < threshold:
+            return None, None, None, best_sim
+
+        return best_face, best_aligned, best_emb, best_sim
+
+    def _maybe_update_reference(self, embedding: np.ndarray, quality_passed: bool, similarity: float):
+        """Conservative reference template update — only high-confidence matches."""
+        max_refs = settings.REGISTRATION_MAX_REFERENCE_EMBEDDINGS
+        if not quality_passed:
+            return
+        if similarity < settings.REGISTRATION_TARGET_REACQUIRE_THRESHOLD:
+            return
+        if len(self.temporary_target_embeddings) >= max_refs:
+            return
+        self.temporary_target_embeddings.append(embedding.copy())
+        mean_vec = np.mean(self.temporary_target_embeddings, axis=0)
+        self.temporary_target_centroid = mean_vec / (np.linalg.norm(mean_vec) + 1e-8)
+
+    # ── Frame processing ─────────────────────────────────────────────────────
+
+    def process_frame(
+        self, frame: np.ndarray, detected_faces: List[DetectedFace], method: str = "WEBCAM"
+    ) -> Dict[str, Any]:
+        self.capture_method = method
+
+        if not self.is_registering:
+            self.is_registering = True
+            if not self.person_id:
+                self.person_id = f"P_{int(datetime.utcnow().timestamp())}"
+                self.person_name = "New Registration"
+
+        if method == "CCTV":
+            return self._process_cctv_frame(frame, detected_faces)
+
+        return self._process_webcam_frame(frame, detected_faces, method)
+
+    def _waiting_payload(self, face_count: int) -> Dict[str, Any]:
+        return {
+            "is_registering": True,
+            "state": "WAITING_FOR_SELECTION",
+            "target": None,
+            "samples_collected": len(gallery_service.samples),
+            "target_samples": self.target_samples,
+            "min_samples": settings.REGISTRATION_MIN_SAMPLES,
+            "max_samples": settings.REGISTRATION_MAX_SAMPLES,
+            "progress_percent": int(
+                min(1.0, len(gallery_service.samples) / max(1, self.target_samples)) * 100
+            ),
+            "pose_coverage": dict(self.pose_coverage),
+            "ai_assistant": {
+                "face_detected": face_count > 0,
+                "centered": False,
+                "sharp": False,
+                "lighting": False,
+                "eyes_visible": False,
+                "identity_verified": False,
+                "guidance": "Click a face to begin registration",
+                "status": "Awaiting face selection...",
+            },
+            "gallery": gallery_service.get_formatted_gallery(),
+        }
+
+    def _lost_payload(self) -> Dict[str, Any]:
+        return {
+            "is_registering": True,
+            "state": "TARGET_LOST",
+            "target": self._target_payload(visible=False, identity_verified=False),
+            "samples_collected": len(gallery_service.samples),
+            "target_samples": self.target_samples,
+            "min_samples": settings.REGISTRATION_MIN_SAMPLES,
+            "max_samples": settings.REGISTRATION_MAX_SAMPLES,
+            "progress_percent": int(
+                min(1.0, len(gallery_service.samples) / max(1, self.target_samples)) * 100
+            ),
+            "pose_coverage": dict(self.pose_coverage),
+            "ai_assistant": {
+                "face_detected": False,
+                "centered": False,
+                "sharp": False,
+                "lighting": False,
+                "eyes_visible": False,
+                "identity_verified": False,
+                "guidance": "Waiting for the selected face...",
+                "status": "Target temporarily lost. Capture paused.",
+            },
+            "gallery": gallery_service.get_formatted_gallery(),
+        }
+
+    def _target_payload(self, visible: bool, identity_verified: bool) -> Dict[str, Any]:
+        return {
+            "camera_id": self.locked_camera_id,
+            "visible": visible,
+            "identity_verified": identity_verified,
+            "bbox": self.target_face_bbox,
+            "thumbnail": self.target_thumbnail,
+            "similarity": round(self.last_target_similarity, 3),
+        }
+
+    def _process_cctv_frame(self, frame: np.ndarray, detected_faces: List[Any]) -> Dict[str, Any]:
+        # Throttle expensive registration work
+        now = time.time()
+        min_interval = 1.0 / max(1, settings.REGISTRATION_PROCESSING_FPS)
+        if (now - self._last_process_ts) < min_interval and self.target_locked:
+            # Still return current status quickly without re-embedding everyone
+            pass
+        self._last_process_ts = now
+
+        # 1. Waiting for operator to click a face
+        if not self.target_locked or self.temporary_target_centroid is None:
+            self.target_state = "WAITING_FOR_SELECTION"
+            return self._waiting_payload(len(detected_faces))
+
+        # 2. Associate target via identity similarity (primary)
+        target_face, aligned_crop, embedding, identity_sim = self._find_target_face(frame, detected_faces)
+        self.last_target_similarity = float(identity_sim) if identity_sim is not None else -1.0
+
+        if target_face is None:
+            if self.target_lost_since is None:
+                self.target_lost_since = now
+                logger.info("TARGET_LOST camera=%s similarity=%.3f", self.locked_camera_id, identity_sim)
+            self.target_state = "TARGET_LOST"
+            return self._lost_payload()
+
+        # Reacquired or still locked
+        was_lost = self.target_state == "TARGET_LOST"
+        if was_lost:
+            logger.info(
+                "TARGET_REACQUIRED camera=%s similarity=%.3f",
+                self.locked_camera_id,
+                identity_sim,
+            )
+
+        self.target_lost_since = None
+        self.target_face_bbox = [float(v) for v in target_face.bbox]
+        self.target_track_id = getattr(target_face, "track_id", self.target_track_id)
+        self.target_last_seen = now
+        self.target_state = "TARGET_LOCKED"
+
+        # 3. Quality gates (only for selected target)
+        quality_res = quality_service.evaluate_quality(
+            frame, target_face.bbox, target_face.landmarks, method="CCTV"
+        )
+        checks = quality_res["checks"]
+        metrics = quality_res.get("metrics", {})
+
+        # 4. Identity verification gate
+        identity_verified = identity_sim >= settings.REGISTRATION_TARGET_SIMILARITY_THRESHOLD
+        identity_reason = None
+        if settings.REGISTRATION_IDENTITY_GUARD_ENABLED and not identity_verified:
+            identity_reason = (
+                f"Identity mismatch (similarity={identity_sim:.3f} "
+                f"< threshold={settings.REGISTRATION_TARGET_SIMILARITY_THRESHOLD})"
+            )
+            logger.debug("FRAME_REJECTED reason=identity_mismatch similarity=%.3f", identity_sim)
+
+        # 5. Conservative reference update
+        if embedding is not None and identity_verified:
+            self._maybe_update_reference(embedding, quality_res["passed"], identity_sim)
+
+        # 6. Pose
+        yaw, pitch, pose_bin = pose_service.calculate_pose_angles(target_face.landmarks)
+        pose_bin = pose_service.normalize_cctv_pose(pose_bin, yaw, pitch)
+        guidance_msg, next_needed_pose = pose_service.get_pose_guidance(
+            gallery_service.get_collected_poses(), mode="CCTV"
+        )
+
+        # 7. Duplicate filter
+        is_duplicate = False
+        if embedding is not None:
+            dup_thresh = settings.REGISTRATION_DUPLICATE_SIMILARITY_THRESHOLD
+            for sample in gallery_service.samples:
+                if float(np.dot(embedding, sample["embedding"])) >= dup_thresh:
+                    is_duplicate = True
+                    break
+
+        cooldown_passed = (now - self.last_capture_time) >= settings.REGISTRATION_CAPTURE_INTERVAL
+        collected_poses = set(gallery_service.get_collected_poses())
+        is_new_pose = pose_bin not in collected_poses
+        current_count = len(gallery_service.samples)
+        under_max = current_count < settings.REGISTRATION_MAX_SAMPLES
+
+        auto_captured = False
+        capture_rejected_reason = None
+
+        if quality_res["passed"] and identity_verified and under_max:
+            if is_duplicate:
+                capture_rejected_reason = "duplicate"
+                logger.debug("FRAME_REJECTED reason=duplicate")
+            elif not cooldown_passed:
+                capture_rejected_reason = "capture_cooldown"
+            elif is_new_pose or current_count < self.target_samples:
+                if aligned_crop is not None and embedding is not None:
+                    gallery_service.add_sample(
+                        frame=frame,
+                        aligned_crop=aligned_crop,
+                        embedding=embedding,
+                        quality_score=quality_res["score"],
+                        pose_bin=pose_bin,
+                        yaw=yaw,
+                        pitch=pitch,
+                        method="CCTV",
+                    )
+                    auto_captured = True
+                    self.last_capture_time = now
+                    self.pose_coverage[pose_bin] = True
+                    self.target_state = "CAPTURING"
+                    logger.info(
+                        "SAMPLE_ACCEPTED pose=%s quality=%.2f similarity=%.3f count=%d",
+                        pose_bin,
+                        quality_res["score"],
+                        identity_sim,
+                        len(gallery_service.samples),
+                    )
+        elif not quality_res["passed"]:
+            reason = (quality_res.get("reasons") or ["quality"])[0]
+            logger.debug("FRAME_REJECTED reason=%s", reason)
+            capture_rejected_reason = reason
+        elif not identity_verified:
+            capture_rejected_reason = identity_reason
+
+        current_count = len(gallery_service.samples)
+        progress_pct = int(min(1.0, current_count / max(1, self.target_samples)) * 100)
+
+        # Pose coverage snapshot
+        for p in pose_service.cctv_required_poses():
+            self.pose_coverage[p] = p in set(gallery_service.get_collected_poses())
+
+        ready = (
+            current_count >= settings.REGISTRATION_MIN_SAMPLES
+            and pose_service.has_minimum_cctv_coverage(gallery_service.get_collected_poses())
+        ) or current_count >= self.target_samples
+
+        if ready and current_count >= settings.REGISTRATION_MIN_SAMPLES:
+            self.target_state = "READY_FOR_REVIEW"
+            status_text = "Enough quality samples collected. Ready to review."
+            logger.info("REGISTRATION_READY samples=%d", current_count)
+        elif auto_captured:
+            status_text = f"Captured {pose_bin.replace('_', ' ').title()} ({current_count}/{self.target_samples})"
+            self.target_state = "CAPTURING"
+        elif not quality_res["passed"]:
+            status_text = quality_res["reasons"][0] if quality_res["reasons"] else "Adjust position"
+        elif not identity_verified:
+            status_text = "Target identity could not be verified"
+        elif is_duplicate:
+            status_text = "Near-duplicate ignored. Slightly change pose."
+        else:
+            status_text = guidance_msg
+
+        if not self.target_thumbnail and aligned_crop is not None:
+            ret_enc, buf = cv2.imencode(".jpg", aligned_crop)
+            if ret_enc:
+                self.target_thumbnail = "data:image/jpeg;base64," + base64.b64encode(buf).decode("utf-8")
+
+        ai_assistant_res = {
+            "face_detected": checks.get("detected", True),
+            "centered": checks.get("centered", False),
+            "sharp": checks.get("sharp", False),
+            "lighting": checks.get("lighting", False),
+            "eyes_visible": checks.get("eyes_visible", False),
+            "face_size_ok": checks.get("face_size", True),
+            "identity_verified": identity_verified,
+            "current_pose": pose_bin,
+            "next_needed_pose": next_needed_pose,
+            "guidance": guidance_msg if next_needed_pose else status_text,
+            "status": status_text,
+            "quality_score": quality_res["score"],
+        }
+        self.last_ai_assistant = ai_assistant_res
 
         return {
             "is_registering": True,
-            "samples_collected": collected_count,
+            "state": self.target_state,
+            "target": self._target_payload(visible=True, identity_verified=identity_verified),
+            "quality": {
+                "passed": quality_res["passed"],
+                "score": quality_res["score"],
+                "sharp": checks.get("sharp", False),
+                "lighting": checks.get("lighting", False),
+                "eyes_visible": checks.get("eyes_visible", False),
+                "centered": checks.get("centered", False),
+                "face_size": checks.get("face_size", True),
+                "metrics": metrics,
+            },
+            "pose": {
+                "current": pose_bin,
+                "required": next_needed_pose,
+                "accepted": auto_captured,
+                "coverage": dict(self.pose_coverage),
+            },
+            "pose_coverage": dict(self.pose_coverage),
+            "capture": {
+                "accepted": auto_captured,
+                "sample_id": gallery_service.samples[-1]["id"] if auto_captured and gallery_service.samples else None,
+                "reason": capture_rejected_reason,
+            },
+            "samples_collected": current_count,
             "target_samples": self.target_samples,
-            "ready_to_save": False,
-            "message": f"Sample {collected_count}/{self.target_samples} captured successfully! Hold still..."
+            "min_samples": settings.REGISTRATION_MIN_SAMPLES,
+            "max_samples": settings.REGISTRATION_MAX_SAMPLES,
+            "progress_percent": progress_pct,
+            "ai_assistant": ai_assistant_res,
+            "gallery": gallery_service.get_formatted_gallery(),
         }
 
-    def save_registration(self) -> Tuple[bool, str]:
-        """Saves collected live stream samples into Person profile, FAISS, and disk."""
-        if not self.is_registering or not self.target_person_id:
-            return False, "No active registration session to save."
+    def _process_webcam_frame(
+        self, frame: np.ndarray, detected_faces: List[Any], method: str
+    ) -> Dict[str, Any]:
+        target_face = capture_service.filter_target_face(detected_faces)
 
-        if len(self.collected_samples) == 0:
-            return False, "No valid face samples collected yet."
+        if len(detected_faces) == 0 or target_face is None:
+            guidance_msg, _ = pose_service.get_pose_guidance(gallery_service.get_collected_poses())
+            return {
+                "is_registering": True,
+                "samples_collected": len(gallery_service.samples),
+                "target_samples": self.target_samples,
+                "progress_percent": int(
+                    (len(gallery_service.samples) / max(1, self.target_samples)) * 100
+                ),
+                "ai_assistant": {
+                    "face_detected": False,
+                    "centered": False,
+                    "sharp": False,
+                    "lighting": False,
+                    "eyes_visible": False,
+                    "guidance": "Please position yourself in front of the camera",
+                    "status": "Searching for face...",
+                },
+                "gallery": gallery_service.get_formatted_gallery(),
+            }
 
-        person_id = self.target_person_id
-        name = self.target_name
+        if len(detected_faces) > 1 and capture_service.locked_track_id is None:
+            return {
+                "is_registering": True,
+                "samples_collected": len(gallery_service.samples),
+                "target_samples": self.target_samples,
+                "progress_percent": int(
+                    (len(gallery_service.samples) / max(1, self.target_samples)) * 100
+                ),
+                "ai_assistant": {
+                    "face_detected": True,
+                    "centered": False,
+                    "sharp": False,
+                    "lighting": False,
+                    "eyes_visible": False,
+                    "guidance": "Multiple faces detected. Please ensure only one person is visible.",
+                    "status": "Multiple faces detected",
+                },
+                "gallery": gallery_service.get_formatted_gallery(),
+            }
 
-        db = SessionLocal()
-        try:
-            self._purge_person_resources_internal(person_id, db)
+        quality_res = quality_service.evaluate_quality(
+            frame, target_face.bbox, target_face.landmarks, method=method
+        )
+        checks = quality_res["checks"]
+        yaw, pitch, pose_bin = pose_service.calculate_pose_angles(target_face.landmarks)
+        guidance_msg, next_needed_pose = pose_service.get_pose_guidance(
+            gallery_service.get_collected_poses()
+        )
 
-            person = PersonModel(
-                person_id=person_id,
-                name=name,
-                gallery_version=1,
-                registered_at=datetime.utcnow()
-            )
-            db.add(person)
-            db.commit()
+        collected_poses = gallery_service.get_collected_poses()
+        is_new_pose = pose_bin not in collected_poses
+        auto_captured = False
 
-            person_dir = settings.FACES_DIR / person_id
-            os.makedirs(person_dir, exist_ok=True)
-
-            embeddings_matrix = np.array([sample["embedding"] for sample in self.collected_samples])
-            faiss_ids = faiss_manager.add_vectors(person_id, name, embeddings_matrix)
-
-            for idx, (sample, f_id) in enumerate(zip(self.collected_samples, faiss_ids)):
-                image_filename = f"sample_{idx + 1}.jpg"
-                image_path = person_dir / image_filename
-                cv2.imwrite(str(image_path), sample["aligned"])
-
-                pose_b = pose_diversity_engine.classify_pose(
-                    0.0, 0.0,
-                    aligned_crop=sample["aligned"],
-                    landmarks=np.array([[38,51],[73,51],[56,71],[41,92],[70,92]])
-                )
-                p_img = PersonImageModel(
-                    person_id=person_id,
-                    image_path=str(image_path),
-                    quality_score=0.90,
-                    pose_bin=pose_b,
-                    gallery_version=1,
-                    is_active=True,
-                    created_at=datetime.utcnow()
-                )
-                db.add(p_img)
-                db.commit()
-                db.refresh(p_img)
-
-                emb_record = EmbeddingModel(
-                    person_id=person_id,
-                    faiss_id=f_id,
-                    image_id=p_img.id,
-                    image_path=str(image_path),
-                    gallery_version=1,
-                    is_active=True,
-                    created_at=datetime.utcnow()
-                )
-                db.add(emb_record)
-
-            db.commit()
-            sample_count = len(self.collected_samples)
-            logger.info(f"Successfully registered {name} ({person_id}) with {sample_count} face embeddings.")
-
-            # Trigger hot-reload across all running camera workers so all visible faces are re-queried instantly
-            try:
-                from app.services.camera.camera_registry import camera_registry
-                camera_registry.reload_all_recognitions()
-            except Exception as r_err:
-                logger.error(f"Error triggering hot-reload: {r_err}")
-
-            self.stop_registration()
-            return True, f"Successfully registered person '{name}' ({person_id}) with {sample_count} face samples."
-
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error saving live registration for {person_id}: {e}", exc_info=True)
-            return False, f"Database transaction failed: {str(e)}"
-        finally:
-            db.close()
-
-    def stop_registration(self):
-        """Stops live registration session."""
-        self.is_registering = False
-        self.target_person_id = None
-        self.target_name = None
-        self.collected_samples.clear()
-
-    # --- 2. Photo Upload Registration ---
-    def register_from_uploads(
-        self,
-        person_id: str,
-        name: str,
-        image_bytes_list: List[bytes],
-        department: Optional[str] = None,
-        role: Optional[str] = None,
-        phone: Optional[str] = None,
-        email: Optional[str] = None,
-        company: Optional[str] = None,
-        notes: Optional[str] = None,
-        first_name: Optional[str] = None,
-        last_name: Optional[str] = None
-    ) -> Tuple[bool, str, int]:
-        """Registers a person by parsing 1 or more uploaded photo files."""
-        db = SessionLocal()
-        try:
-            collected_embeddings = []
-            collected_crops = []
-
-            from app.services.quality.quality_engine import quality_engine
-
-            for img_bytes in image_bytes_list:
-                nparr = np.frombuffer(img_bytes, np.uint8)
-                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                if img is None:
-                    continue
-
-                detected = detector_engine.detect(img)
-                if detected:
-                    best_face = max(detected, key=lambda f: (f.bbox[2]-f.bbox[0])*(f.bbox[3]-f.bbox[1]))
-                    landmarks_np = np.array(best_face.landmarks)
-                    aligned_crop = align_face(img, landmarks_np)
-                    embedding = arcface_recognizer.extract_embedding(aligned_crop)
-                    
-                    eval_res = quality_engine.evaluate(img, best_face.bbox, best_face.landmarks)
-                    q_score = float(eval_res.get("quality_score", 0.0))
-                    yaw = float(eval_res.get("pose_yaw", 0.0))
-                    pitch = float(eval_res.get("pose_pitch", 0.0))
-                    brightness = float(eval_res.get("brightness", 0.0))
-                    blur = float(eval_res.get("blur_score", 0.0))
-                else:
-                    # Fallback for tightly-cropped/pre-aligned crops
-                    aligned_crop = cv2.resize(img, (112, 112))
-                    embedding = arcface_recognizer.extract_embedding(aligned_crop)
-                    q_score = 0.85
-                    yaw = 0.0
-                    pitch = 0.0
-                    brightness = 127.0
-                    blur = 80.0
-
+        if quality_res["passed"] and (
+            is_new_pose or len(gallery_service.samples) < self.target_samples
+        ):
+            aligned_crop = embedding_service.generate_aligned_crop(frame, target_face.landmarks)
+            if aligned_crop is not None:
+                embedding = embedding_service.extract_embedding(aligned_crop)
                 if embedding is not None:
-                    collected_embeddings.append(embedding)
-                    collected_crops.append({
-                        "aligned": aligned_crop,
-                        "quality_score": q_score,
-                        "yaw": yaw,
-                        "pitch": pitch,
-                        "brightness": brightness,
-                        "blur_score": blur
-                    })
+                    # Duplicate gate for webcam too
+                    is_dup = any(
+                        float(np.dot(embedding, s["embedding"]))
+                        >= settings.REGISTRATION_DUPLICATE_SIMILARITY_THRESHOLD
+                        for s in gallery_service.samples
+                    )
+                    if not is_dup and len(gallery_service.samples) < settings.REGISTRATION_MAX_SAMPLES:
+                        gallery_service.add_sample(
+                            frame=frame,
+                            aligned_crop=aligned_crop,
+                            embedding=embedding,
+                            quality_score=quality_res["score"],
+                            pose_bin=pose_bin,
+                            yaw=yaw,
+                            pitch=pitch,
+                            method=method,
+                        )
+                        auto_captured = True
 
-            if not collected_embeddings:
-                return False, "No valid faces detected in uploaded photos. Please upload clearer face photos.", 0
+        current_count = len(gallery_service.samples)
+        progress_pct = int(min(1.0, current_count / max(1, self.target_samples)) * 100)
 
-            self._purge_person_resources_internal(person_id, db)
+        if auto_captured:
+            status_text = f"Captured {pose_bin} pose sample! ({current_count}/{self.target_samples})"
+        elif not quality_res["passed"]:
+            status_text = quality_res["reasons"][0] if quality_res["reasons"] else "Adjust position"
+        else:
+            status_text = f"{pose_bin} pose already captured. {guidance_msg}"
 
-            person = PersonModel(
-                person_id=person_id,
-                name=name,
-                first_name=first_name,
-                last_name=last_name,
-                department=department,
-                role=role,
-                phone=phone,
-                email=email,
-                company=company,
-                notes=notes,
-                gallery_version=1,
-                registered_at=datetime.utcnow()
+        ai_assistant_res = {
+            "face_detected": checks["detected"],
+            "centered": checks["centered"],
+            "sharp": checks["sharp"],
+            "lighting": checks["lighting"],
+            "eyes_visible": checks["eyes_visible"],
+            "current_pose": pose_bin,
+            "next_needed_pose": next_needed_pose,
+            "guidance": guidance_msg,
+            "status": status_text,
+            "quality_score": quality_res["score"],
+        }
+        self.last_ai_assistant = ai_assistant_res
+
+        return {
+            "is_registering": True,
+            "samples_collected": current_count,
+            "target_samples": self.target_samples,
+            "progress_percent": progress_pct,
+            "auto_captured": auto_captured,
+            "ai_assistant": ai_assistant_res,
+            "gallery": gallery_service.get_formatted_gallery(),
+        }
+
+    def remove_sample(self, sample_id: str) -> Dict[str, Any]:
+        removed = gallery_service.remove_sample(sample_id)
+        for p in pose_service.cctv_required_poses():
+            self.pose_coverage[p] = p in set(gallery_service.get_collected_poses())
+        return {
+            "status": "success" if removed else "error",
+            "message": "Sample removed" if removed else "Sample ID not found",
+            "gallery": gallery_service.get_formatted_gallery(),
+            "pose_coverage": dict(self.pose_coverage),
+        }
+
+    def commit_registration(self) -> Tuple[bool, str, Dict[str, Any]]:
+        if not self.is_registering or not self.person_id:
+            return False, "No active registration session to commit.", {}
+
+        if len(gallery_service.samples) == 0:
+            return False, "Gallery is empty. Please capture face images before submitting.", {}
+
+        if len(gallery_service.samples) < settings.REGISTRATION_MIN_SAMPLES:
+            return (
+                False,
+                f"Need at least {settings.REGISTRATION_MIN_SAMPLES} quality samples "
+                f"(have {len(gallery_service.samples)}).",
+                {},
             )
 
-            db.add(person)
-            db.commit()
+        person_id = self.person_id
+        person_name = self.person_name
 
-            person_dir = settings.FACES_DIR / person_id
-            os.makedirs(person_dir, exist_ok=True)
+        all_embeddings = [s["embedding"] for s in gallery_service.samples]
+        is_dup, dup_info = duplicate_service.check_duplicate(all_embeddings, current_person_id=person_id)
+        if is_dup and dup_info:
+            return (
+                False,
+                f"Duplicate Face Alert: Matching face already registered for "
+                f"'{dup_info['matched_name']}' (ID: {dup_info['matched_person_id']}).",
+                {},
+            )
 
-            embeddings_matrix = np.array(collected_embeddings, dtype=np.float32)
-            faiss_ids = faiss_manager.add_vectors(person_id, name, embeddings_matrix)
-
-            for idx, (crop_info, f_id) in enumerate(zip(collected_crops, faiss_ids)):
-                crop = crop_info["aligned"]
-                img_path = person_dir / f"uploaded_{idx+1}.jpg"
-                cv2.imwrite(str(img_path), crop)
-
-                pose_b = pose_diversity_engine.classify_pose(
-                    0.0, 0.0,
-                    aligned_crop=crop,
-                    landmarks=np.array([[38,51],[73,51],[56,71],[41,92],[70,92]])
-                )
-                p_img = PersonImageModel(
-                    person_id=person_id,
-                    image_path=str(img_path),
-                    quality_score=crop_info["quality_score"],
-                    yaw=crop_info["yaw"],
-                    pitch=crop_info["pitch"],
-                    brightness=crop_info["brightness"],
-                    blur_score=crop_info["blur_score"],
-                    pose_bin=pose_b,
-                    gallery_version=1,
-                    is_active=True,
-                    created_at=datetime.utcnow()
-                )
-                db.add(p_img)
-                db.commit()
-                db.refresh(p_img)
-
-                emb_record = EmbeddingModel(
-                    person_id=person_id,
-                    faiss_id=f_id,
-                    image_id=p_img.id,
-                    image_path=str(img_path),
-                    gallery_version=1,
-                    is_active=True,
-                    created_at=datetime.utcnow()
-                )
-                db.add(emb_record)
-
-            db.commit()
-
-            try:
-                from app.services.camera.camera_registry import camera_registry
-                camera_registry.reload_all_recognitions()
-            except Exception as r_err:
-                logger.error(f"Error triggering hot-reload: {r_err}")
-
-            return True, f"Successfully registered '{name}' ({person_id}) with {len(collected_embeddings)} face embeddings!", len(collected_embeddings)
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error in upload registration: {e}", exc_info=True)
-            return False, f"Upload registration failed: {str(e)}", 0
-        finally:
-            db.close()
-
-    # --- 3. Live Snapshot Thumbnail Registration ---
-    def register_from_snapshot(self, person_id: str, name: str, crop_base64: str) -> Tuple[bool, str]:
-        """Registers a person from a base64 encoded face crop snapshot."""
         db = SessionLocal()
         try:
-            b64_data = crop_base64.split(",")[-1]
-            img_bytes = base64.b64decode(b64_data)
-            nparr = np.frombuffer(img_bytes, np.uint8)
-            crop_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-            if crop_img is None:
-                return False, "Invalid image snapshot data."
-
-            if crop_img.shape[:2] != (112, 112):
-                crop_img = cv2.resize(crop_img, (112, 112))
-
-            embedding = arcface_recognizer.extract_embedding(crop_img)
-
-            self._purge_person_resources_internal(person_id, db)
-
-            person = PersonModel(
-                person_id=person_id,
-                name=name,
-                gallery_version=1,
-                registered_at=datetime.utcnow()
-            )
-            db.add(person)
-            db.commit()
-
-            person_dir = settings.FACES_DIR / person_id
-            os.makedirs(person_dir, exist_ok=True)
-            img_path = person_dir / "snapshot_1.jpg"
-            cv2.imwrite(str(img_path), crop_img)
-
-            embeddings_matrix = np.array([embedding], dtype=np.float32)
-            faiss_ids = faiss_manager.add_vectors(person_id, name, embeddings_matrix)
-
-            p_img = PersonImageModel(
-                person_id=person_id,
-                image_path=str(img_path),
-                quality_score=0.85,
-                pose_bin="FRONTAL",
-                gallery_version=1,
-                is_active=True,
-                created_at=datetime.utcnow()
-            )
-            db.add(p_img)
-            db.commit()
-            db.refresh(p_img)
-
-            emb_record = EmbeddingModel(
-                person_id=person_id,
-                faiss_id=faiss_ids[0],
-                image_id=p_img.id,
-                image_path=str(img_path),
-                gallery_version=1,
-                is_active=True,
-                created_at=datetime.utcnow()
-            )
-            db.add(emb_record)
-            db.commit()
-
-            return True, f"Successfully registered '{name}' ({person_id}) from live snapshot!"
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error in snapshot registration: {e}", exc_info=True)
-            return False, f"Snapshot registration failed: {str(e)}"
-        finally:
-            db.close()
-
-    # --- 4. Candidate Registration ---
-    def register_person_from_candidate(
-        self,
-        candidate_id: str,
-        person_id: str,
-        name: str,
-        department: Optional[str] = None,
-        role: Optional[str] = None
-    ) -> Tuple[bool, str, Dict[str, Any]]:
-        """Registers a person from a curated candidate profile."""
-        db = SessionLocal()
-        try:
-            candidate = db.query(CandidateModel).filter(CandidateModel.candidate_id == candidate_id).first()
-            if not candidate:
-                return False, f"Candidate '{candidate_id}' not found.", {}
-
-            if not candidate.images:
-                return False, f"Candidate '{candidate_id}' has no images.", {}
-
-            self._purge_person_resources_internal(person_id, db)
-
-            person = PersonModel(
-                person_id=person_id,
-                name=name,
-                department=department,
-                role=role,
-                gallery_version=1,
-                source_candidate_id=candidate_id,
-                registered_at=datetime.utcnow()
-            )
-            db.add(person)
-            db.commit()
-
-            person_dir = settings.FACES_DIR / person_id
-            os.makedirs(person_dir, exist_ok=True)
-
-            collected_embeddings = []
-            registered_images = []
-
-            for idx, c_img in enumerate(candidate.images):
-                if not c_img.image_path or not os.path.exists(c_img.image_path):
-                    continue
-
-                crop = cv2.imread(c_img.image_path)
-                if crop is None:
-                    continue
-
-                img_name = f"gallery_v1_{idx+1}.jpg"
-                dest_path = person_dir / img_name
-                cv2.imwrite(str(dest_path), crop)
-
-                emb = arcface_recognizer.extract_embedding(crop)
-                collected_embeddings.append(emb)
-
-                p_img = PersonImageModel(
+            existing_person = db.query(PersonModel).filter(PersonModel.person_id == person_id).first()
+            if existing_person:
+                existing_person.first_name = self.person_info.get("first_name")
+                existing_person.last_name = self.person_info.get("last_name")
+                existing_person.name = person_name
+                existing_person.department = self.person_info.get("department")
+                existing_person.role = self.person_info.get("role")
+                existing_person.phone = self.person_info.get("phone")
+                existing_person.email = self.person_info.get("email")
+                existing_person.notes = self.person_info.get("notes")
+                existing_person.gallery_version = (existing_person.gallery_version or 1) + 1
+                person_model = existing_person
+            else:
+                person_model = PersonModel(
                     person_id=person_id,
-                    image_path=str(dest_path),
-                    quality_score=c_img.quality_score,
-                    pose_bin=c_img.pose_bin,
+                    first_name=self.person_info.get("first_name"),
+                    last_name=self.person_info.get("last_name"),
+                    name=person_name,
+                    department=self.person_info.get("department"),
+                    role=self.person_info.get("role"),
+                    phone=self.person_info.get("phone"),
+                    email=self.person_info.get("email"),
+                    notes=self.person_info.get("notes"),
                     gallery_version=1,
-                    is_active=True,
-                    camera_id=c_img.camera_id,
-                    created_at=datetime.utcnow()
+                    registered_at=datetime.utcnow(),
                 )
-                db.add(p_img)
-                registered_images.append(p_img)
+                db.add(person_model)
 
             db.commit()
 
-            if not collected_embeddings:
-                return False, "Failed to extract embeddings from candidate images.", {}
+            embeddings_matrix = np.array(all_embeddings, dtype=np.float32)
+            faiss_ids = faiss_manager.add_vectors(person_id, person_name, embeddings_matrix)
 
-            emb_matrix = np.array(collected_embeddings, dtype=np.float32)
-            faiss_ids = faiss_manager.add_vectors(person_id, name, emb_matrix)
+            sample_count = len(gallery_service.samples)
+            for idx, (sample, f_id) in enumerate(zip(gallery_service.samples, faiss_ids)):
+                file_name = f"sample_{idx + 1}_{sample['pose_bin'].lower()}.jpg"
+                saved_path = storage_service.save_face_image(person_id, file_name, sample["aligned"])
 
-            for p_img, f_id in zip(registered_images, faiss_ids):
+                img_rec = PersonImageModel(
+                    person_id=person_id,
+                    image_path=saved_path,
+                    quality_score=sample["quality_score"],
+                    pose_bin=sample["pose_bin"],
+                    yaw=sample["yaw"],
+                    pitch=sample["pitch"],
+                    gallery_version=person_model.gallery_version,
+                )
+                db.add(img_rec)
+                db.flush()
+
                 emb_rec = EmbeddingModel(
                     person_id=person_id,
                     faiss_id=f_id,
-                    image_id=p_img.id,
-                    image_path=p_img.image_path,
-                    gallery_version=1,
-                    is_active=True,
-                    created_at=datetime.utcnow()
+                    image_id=img_rec.id,
+                    image_path=saved_path,
+                    gallery_version=person_model.gallery_version,
                 )
                 db.add(emb_rec)
 
-            candidate.status = "REGISTERED"
+            db.commit()
 
             audit = AuditLogModel(
                 action="REGISTER_PERSON",
-                entity_type="PERSON",
-                entity_id=person_id,
-                details=f"Registered '{name}' ({person_id}) from candidate '{candidate_id}' with {len(collected_embeddings)} samples.",
-                performed_by="operator"
+                person_id=person_id,
+                details=f"Registered {person_name} with {sample_count} gallery face samples.",
             )
             db.add(audit)
             db.commit()
 
-            return True, f"Successfully registered '{name}' ({person_id})", {
+            self.is_registering = False
+            self.target_state = "COMPLETED"
+            result_data = {
                 "person_id": person_id,
-                "name": name,
-                "gallery_version": 1,
-                "samples_count": len(collected_embeddings)
+                "name": person_name,
+                "samples_count": sample_count,
+                "gallery_version": person_model.gallery_version,
             }
+            gallery_service.clear()
+            capture_service.unlock_track()
+            logger.info("REGISTRATION_COMPLETED person=%s samples=%d", person_id, sample_count)
+            return True, f"Successfully registered {person_name} with {sample_count} quality samples!", result_data
+
         except Exception as e:
             db.rollback()
-            logger.error(f"Error registering person from candidate: {e}", exc_info=True)
-            return False, f"Registration transaction failed: {str(e)}", {}
+            logger.error("Commit registration failed: %s", e, exc_info=True)
+            return False, f"Database error during registration commit: {str(e)}", {}
         finally:
             db.close()
 
-    # --- 5. Deletion & Cleanup ---
-    def delete_person(self, person_id: str) -> bool:
-        """Cleanly deletes a person profile, database embeddings, FAISS vectors, and disk images."""
-        db = SessionLocal()
-        try:
-            res = self._purge_person_resources_internal(person_id, db)
-            db.commit()
-
-            try:
-                from app.services.camera.camera_registry import camera_registry
-                camera_registry.reload_all_recognitions()
-            except Exception as r_err:
-                logger.error(f"Error triggering hot-reload after delete: {r_err}")
-
-            return res
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error deleting person '{person_id}': {e}")
-            return False
-        finally:
-            db.close()
-
-    def _purge_person_resources_internal(self, person_id: str, db) -> bool:
-        """Internal helper to clean database, active events, FAISS index, and disk files before upsert/delete."""
-        import shutil
-        person = db.query(PersonModel).filter(PersonModel.person_id == person_id).first()
-        if person:
-            db.query(RecognitionLogModel).filter(RecognitionLogModel.person_id == person_id).delete()
-            db.delete(person)
-            db.commit()
-
-            faiss_manager.remove_person(person_id)
-
-            person_dir = settings.FACES_DIR / person_id
-            if person_dir.exists():
-                shutil.rmtree(person_dir, ignore_errors=True)
-            return True
-        return False
 
 registration_engine = RegistrationEngine()
-# Re-export alias for legacy code compatibility
-registration_service = registration_engine
-delete_existing_person_internal = registration_engine._purge_person_resources_internal

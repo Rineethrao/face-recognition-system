@@ -2,6 +2,7 @@ import logging
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from app.config import settings
+# pyrefly: ignore [missing-import]
 from app.models.db_models import Base
 
 logger = logging.getLogger(__name__)

@@ -553,11 +553,11 @@ export function Cameras() {
         {/* Page Title & Actions */}
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-xl font-bold text-white flex items-center gap-2.5">
-              <CameraIcon className="w-5 h-5 text-primary-400" />
+            <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center gap-2.5">
+              <CameraIcon className="w-5 h-5 text-blue-500 dark:text-primary-400" />
               CCTV Camera Registry
             </h2>
-            <p className="text-xs text-slate-400 mt-1">
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
               Backend-managed isolated streams • Auto RTSP generation • Thread-safe buffering
             </p>
           </div>
@@ -586,10 +586,10 @@ export function Cameras() {
               return (
                 <div
                   key={camId}
-                  className="glass rounded-2xl overflow-hidden border border-white/5 hover:border-primary-500/30 transition-all duration-300 flex flex-col group"
+                  className="glass rounded-2xl overflow-hidden border border-slate-200 dark:border-white/5 hover:border-primary-500/30 transition-all duration-300 flex flex-col group"
                 >
                   {/* Live Stream Preview Header */}
-                  <div className="relative aspect-video bg-navy-950 overflow-hidden border-b border-white/5">
+                  <div className="relative aspect-video bg-navy-950 overflow-hidden border-b border-slate-200 dark:border-white/5">
                     {isOnline ? (
                       <img
                         src={getStreamUrl(camId)}
@@ -632,18 +632,18 @@ export function Cameras() {
                     <div>
                       <div className="flex items-start justify-between">
                         <div>
-                          <h3 className="font-bold text-white text-base">{cam.name}</h3>
-                          <p className="text-xs text-slate-400">{cam.location}</p>
+                          <h3 className="font-bold text-slate-900 dark:text-white text-base">{cam.name}</h3>
+                          <p className="text-xs text-slate-500 dark:text-slate-400">{cam.location}</p>
                         </div>
                       </div>
 
-                      <div className="mt-3 text-xs font-mono text-slate-400 bg-navy-950 rounded-lg px-3 py-2 border border-white/5 truncate">
+                      <div className="mt-3 text-xs font-mono text-slate-600 dark:text-slate-400 bg-slate-100 dark:bg-navy-950 rounded-lg px-3 py-2 border border-slate-200 dark:border-white/5 truncate">
                         {cam.source || `${cam.ip_address || '127.0.0.1'}:${cam.port || 554}`}
                       </div>
                     </div>
 
                     {/* Recognition Activity & Metadata */}
-                    <div className="border-t border-white/5 pt-3 space-y-2 text-xs text-slate-400">
+                    <div className="border-t border-slate-200 dark:border-white/5 pt-3 space-y-2 text-xs text-slate-500 dark:text-slate-400">
                       <div className="flex justify-between">
                         <span>AI Recognition</span>
                         <span className={cam.enabled ? 'text-green-400 font-semibold' : 'text-slate-500'}>
@@ -653,20 +653,20 @@ export function Cameras() {
                       {cam.last_recognition ? (
                         <div className="flex justify-between text-[11px]">
                           <span>Last Seen</span>
-                          <span className="text-primary-400 font-semibold">{cam.last_recognition.name} ({cam.last_recognition.recognized_at})</span>
+                          <span className="text-blue-600 dark:text-primary-400 font-semibold">{cam.last_recognition.name} ({cam.last_recognition.recognized_at})</span>
                         </div>
                       ) : null}
                     </div>
 
                     {/* Card Actions */}
-                    <div className="flex gap-2 border-t border-white/5 pt-3">
+                    <div className="flex gap-2 border-t border-slate-200 dark:border-white/5 pt-3">
                       <button
                         onClick={() => toggleCameraEnabled(cam)}
                         className={clsx(
                           'py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all flex-1',
                           cam.enabled
                             ? 'bg-green-500/15 text-green-400 border border-green-500/30 hover:bg-green-500/25'
-                            : 'bg-slate-700/50 text-slate-400 border border-slate-600 hover:text-white'
+                            : 'bg-slate-100 dark:bg-slate-700/50 text-slate-600 dark:text-slate-400 border border-slate-300 dark:border-slate-600 hover:text-slate-900 dark:hover:text-white'
                         )}
                       >
                         {cam.enabled ? '● Enabled' : '○ Disabled'}
@@ -697,7 +697,7 @@ export function Cameras() {
             {/* Add Camera Card */}
             <button
               onClick={() => setWizardCam('new')}
-              className="glass rounded-2xl border-2 border-dashed border-white/10 hover:border-primary-500/40 p-6 flex flex-col items-center justify-center gap-3 text-slate-500 hover:text-primary-400 transition-all min-h-[300px]"
+              className="glass rounded-2xl border-2 border-dashed border-slate-200 dark:border-white/10 hover:border-blue-500/40 p-6 flex flex-col items-center justify-center gap-3 text-slate-500 hover:text-blue-500 dark:hover:text-primary-400 transition-all min-h-[300px]"
             >
               <div className="w-12 h-12 rounded-full glass border border-white/10 flex items-center justify-center text-primary-400">
                 <Plus className="w-6 h-6" />

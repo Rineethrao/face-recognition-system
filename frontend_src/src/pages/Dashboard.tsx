@@ -1,101 +1,123 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
-  Camera, Users, Eye, AlertTriangle, Activity, Database,
-  TrendingUp, CheckCircle, XCircle, ArrowRight, Video,
+  Camera, Users, Eye, AlertTriangle, Activity,
+  TrendingUp, CheckCircle2, ArrowRight, Video, UserPlus,
+  RefreshCw, Radio
 } from 'lucide-react'
 
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, AreaChart, Area, BarChart, Bar,
+  ResponsiveContainer, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip
 } from 'recharts'
 import { TopBar } from '../components/TopBar'
 import { useStore } from '../store/useStore'
-import { getHealth, getCameras, getRecognitions } from '../lib/api'
-import type { RecognitionEvent } from '../lib/api'
+import { getHealth, getCameras, getRecognitions, type RecognitionEvent, type CameraConfig } from '../lib/api'
+import { Card, CardHeader, CardTitle, CardBody } from '../components/ui/Card'
+import { Badge } from '../components/ui/Badge'
+import { Button } from '../components/ui/Button'
+import { StatCardSkeleton, CameraCardSkeleton, TableRowSkeleton } from '../components/ui/Skeleton'
+import { EmptyState } from '../components/ui/EmptyState'
 import clsx from 'clsx'
 
-// Generate mock trend data from real events
 function buildHourlyData(events: RecognitionEvent[]) {
   const hours: Record<number, number> = {}
   for (let i = 0; i < 12; i++) hours[i] = 0
 
   events.forEach(e => {
-    const h = new Date(e.recognized_at).getHours() % 12
-    hours[h] = (hours[h] || 0) + 1
+    const dateObj = new Date(e.recognized_at)
+    if (!isNaN(dateObj.getTime())) {
+      const h = dateObj.getHours() % 12
+      hours[h] = (hours[h] || 0) + 1
+    }
   })
 
   return Object.entries(hours).map(([h, count]) => ({
     time: `${(parseInt(h) * 2).toString().padStart(2, '0')}:00`,
     recognitions: count,
-    unknown: Math.floor(count * 0.3),
+    unknown: Math.floor(count * 0.25),
   }))
 }
 
-interface StatCardProps {
-  icon: React.ElementType
-  label: string
-  value: string | number
-  sub?: string
-  color?: string
-  trend?: number
+function formatLocalTime(utcString: string) {
+  if (!utcString) return ''
+  const isoString = utcString.replace(' ', 'T') + 'Z'
+  const date = new Date(isoString)
+  if (isNaN(date.getTime())) {
+    const normalDate = new Date(utcString)
+    if (isNaN(normalDate.getTime())) return utcString
+    return normalDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+  }
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
 }
 
-function StatCard({ icon: Icon, label, value, sub, color = 'blue', trend }: StatCardProps) {
-  const colors: Record<string, string> = {
-    blue: 'text-blue-400 bg-blue-500/10',
-    teal: 'text-teal-400 bg-teal-500/10',
-    green: 'text-green-400 bg-green-500/10',
-    red: 'text-red-400 bg-red-500/10',
-    yellow: 'text-yellow-400 bg-yellow-500/10',
-    purple: 'text-purple-400 bg-purple-500/10',
+function DashboardEventItem({ event }: { event: RecognitionEvent }) {
+  const isUnknown = event.person_id === 'unknown'
+  const [imgSrc, setImgSrc] = useState<string>(() =>
+    isUnknown ? '' : `/faces/${event.person_id}/sample_1_frontal.jpg`
+  )
+  const [imgError, setImgError] = useState(false)
+
+  const handleImgError = () => {
+    if (imgSrc.endsWith('sample_1_frontal.jpg')) {
+      setImgSrc(`/faces/${event.person_id}/sample_1.jpg`)
+    } else if (imgSrc.endsWith('sample_1.jpg')) {
+      setImgSrc(`/faces/${event.person_id}/uploaded_1.jpg`)
+    } else if (imgSrc.endsWith('uploaded_1.jpg')) {
+      setImgSrc(`/faces/${event.person_id}/snapshot_1.jpg`)
+    } else {
+      setImgError(true)
+    }
   }
 
+  const pct = Math.round((event.similarity || 0) * 100)
+
   return (
-    <div className="stat-card group animate-slide-in-up">
-      <div className="flex items-start justify-between mb-4">
-        <div className={clsx('w-10 h-10 rounded-xl flex items-center justify-center', colors[color])}>
-          <Icon className="w-5 h-5" />
-        </div>
-        {trend !== undefined && (
-          <span className={clsx(
-            'text-xs font-semibold px-2 py-1 rounded-full',
-            trend >= 0 ? 'text-green-400 bg-green-500/10' : 'text-red-400 bg-red-500/10'
-          )}>
-            {trend >= 0 ? '+' : ''}{trend}%
-          </span>
+    <div
+      className={clsx(
+        'p-2.5 rounded-xl border flex items-center gap-3 transition-all duration-150',
+        isUnknown
+          ? 'bg-amber-500/5 dark:bg-amber-950/20 border-amber-500/20 hover:border-amber-500/40'
+          : 'bg-white/80 dark:bg-slate-900/80 border-slate-200 dark:border-slate-800 hover:border-blue-500/40'
+      )}
+    >
+      {/* Profile Image / Initial */}
+      <div className={clsx(
+        'w-10 h-10 rounded-xl flex items-center justify-center font-bold text-xs flex-shrink-0 overflow-hidden border bg-slate-950',
+        isUnknown
+          ? 'border-amber-500/30 text-amber-400'
+          : 'border-emerald-500/30 text-emerald-400'
+      )}>
+        {!isUnknown && !imgError && imgSrc ? (
+          <img
+            src={imgSrc}
+            alt={event.name}
+            onError={handleImgError}
+            className="w-full h-full object-cover"
+          />
+        ) : (
+          <span>{isUnknown ? '?' : (event.name?.[0]?.toUpperCase() || 'U')}</span>
         )}
       </div>
-      <div className="text-2xl font-bold text-white mb-1">{value}</div>
-      <div className="text-sm font-medium text-slate-400">{label}</div>
-      {sub && <div className="text-xs text-slate-500 mt-1">{sub}</div>}
-    </div>
-  )
-}
 
-function ResourceMeter({ label, value, color }: { label: string; value: number; color: string }) {
-  const colorMap: Record<string, string> = {
-    blue: 'from-blue-500 to-blue-400',
-    teal: 'from-teal-500 to-teal-400',
-    purple: 'from-purple-500 to-purple-400',
-    green: 'from-green-500 to-green-400',
-  }
+      {/* Event Details */}
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center justify-between gap-1 mb-0.5">
+          <span className={clsx('text-xs font-bold truncate', isUnknown ? 'text-amber-600 dark:text-amber-300' : 'text-slate-900 dark:text-white')}>
+            {isUnknown ? 'Unknown Person' : event.name}
+          </span>
+          {!isUnknown && (
+            <Badge variant={pct >= 75 ? 'success' : 'warning'} size="sm">
+              {pct}% Match
+            </Badge>
+          )}
+        </div>
 
-  return (
-    <div>
-      <div className="flex justify-between text-xs mb-1.5">
-        <span className="text-slate-400">{label}</span>
-        <span className={clsx('font-mono font-semibold',
-          value > 80 ? 'text-red-400' : value > 60 ? 'text-yellow-400' : 'text-slate-300'
-        )}>
-          {value.toFixed(1)}%
-        </span>
-      </div>
-      <div className="progress-bar">
-        <div
-          className={clsx('progress-fill bg-gradient-to-r', colorMap[color])}
-          style={{ width: `${value}%` }}
-        />
+        <div className="text-[10px] text-slate-500 dark:text-slate-400 flex items-center justify-between">
+          <span className="truncate">{event.camera_id || 'CCTV Stream'}</span>
+          <span className="font-mono text-[9px] text-slate-500 flex-shrink-0">
+            {formatLocalTime(event.recognized_at)}
+          </span>
+        </div>
       </div>
     </div>
   )
@@ -104,212 +126,310 @@ function ResourceMeter({ label, value, color }: { label: string; value: number; 
 export function Dashboard() {
   const { health, cameras, recentEvents, setHealth, setCameras, setRecentEvents } = useStore()
   const [loading, setLoading] = useState(true)
-  const hourlyData = buildHourlyData(recentEvents)
+
+  const loadData = async () => {
+    try {
+      const [h, c, events] = await Promise.all([getHealth(), getCameras(), getRecognitions(50)])
+      setHealth(h)
+      setCameras(c)
+      setRecentEvents(events)
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setLoading(false)
+    }
+  }
 
   useEffect(() => {
-    async function load() {
-      try {
-        const [h, c, events] = await Promise.all([getHealth(), getCameras(), getRecognitions(50)])
-        setHealth(h)
-        setCameras(c)
-        setRecentEvents(events)
-      } catch (e) {
-        console.error(e)
-      } finally {
-        setLoading(false)
-      }
-    }
-    load()
-    const interval = setInterval(() => {
-      getHealth().then(setHealth).catch(() => {})
-      getRecognitions(50).then(setRecentEvents).catch(() => {})
-    }, 10000)
+    loadData()
+    const interval = setInterval(loadData, 10000)
     return () => clearInterval(interval)
   }, [])
 
-  const onlineCams = cameras.filter(c => c.enabled).length
-  const offlineCams = cameras.length - onlineCams
+  // Sort cameras: Enabled/Online first
+  const sortedCameras = [...cameras].sort((a, b) => {
+    const aOnline = a.enabled && a.status !== 'OFFLINE' ? 1 : 0
+    const bOnline = b.enabled && b.status !== 'OFFLINE' ? 1 : 0
+    return bOnline - aOnline
+  })
+
+  const onlineCams = cameras.filter(c => c.enabled && c.status !== 'OFFLINE').length
+  const totalCams = cameras.length
   const totalPersons = health?.database?.total_persons ?? 0
-  const totalVectors = health?.faiss?.total_registered_vectors ?? 0
-  const todayEvents = recentEvents.length
-  const unknownEvents = recentEvents.filter(e => e.person_id === 'unknown').length
+  const todayDetections = recentEvents.length
+  const unknownAlerts = recentEvents.filter(e => e.person_id === 'unknown').length
 
-  const cpu = health?.system?.cpu_percent ?? 42
-  const ram = health?.system?.ram_percent ?? 61
-  const gpu = health?.system?.gpu_percent ?? 28
-
-  const TOOLTIP_STYLE = {
-    backgroundColor: '#0d1224',
-    border: '1px solid rgba(255,255,255,0.08)',
-    borderRadius: '12px',
-    color: '#e2e8f0',
-    fontSize: '12px',
-  }
+  const hourlyData = buildHourlyData(recentEvents)
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
-      <TopBar title="Dashboard" />
+    <div className="flex flex-col h-full overflow-hidden bg-transparent text-slate-900 dark:text-slate-100">
+      <TopBar title="Security Operations Center" />
 
-      <div className="flex-1 overflow-y-auto p-6 space-y-6">
+      <div className="flex-1 p-4 md:p-6 space-y-6 overflow-y-auto">
+        {/* Quick Action Banner */}
+        <div className="bg-white/80 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 md:p-6 backdrop-blur-xl shadow-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2 text-xs font-bold text-blue-500 dark:text-blue-400 uppercase tracking-wider mb-1">
+              <Radio className="w-3.5 h-3.5 animate-pulse" /> Live Surveillance Feed
+            </div>
+            <h2 className="text-xl font-bold text-slate-900 dark:text-white tracking-tight">Enterprise CCTV Control Room</h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Real-time facial detection, identity verification, and multi-camera stream analytics.</p>
+          </div>
 
-        {/* Stat Cards Row */}
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
-          <StatCard icon={Camera} label="Online Cameras" value={onlineCams} color="green" trend={0} />
-          <StatCard icon={XCircle} label="Offline Cameras" value={offlineCams} color="red" />
-          <StatCard icon={Eye} label="Faces Today" value={todayEvents} color="blue" trend={12} />
-          <StatCard icon={AlertTriangle} label="Unknown Faces" value={unknownEvents} color="yellow" />
-          <StatCard icon={Users} label="Registered Persons" value={totalPersons} color="teal" />
-          <StatCard icon={Database} label="FAISS Vectors" value={totalVectors} color="purple" sub="ArcFace 512-D" />
+          <div className="flex items-center gap-3 flex-wrap">
+            <Link to="/register">
+              <Button variant="primary" icon={<UserPlus className="w-4 h-4" />}>
+                Register Person
+              </Button>
+            </Link>
+            <Link to="/live">
+              <Button variant="secondary" icon={<Video className="w-4 h-4" />}>
+                Live Monitor
+              </Button>
+            </Link>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<RefreshCw className="w-3.5 h-3.5" />}
+              onClick={loadData}
+              title="Refresh Dashboard"
+            />
+          </div>
         </div>
 
-        {/* Middle Row: Camera Previews + Recognition Trend */}
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        {/* Operator Priority KPI Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {loading ? (
+            <>
+              <StatCardSkeleton />
+              <StatCardSkeleton />
+              <StatCardSkeleton />
+              <StatCardSkeleton />
+            </>
+          ) : (
+            <>
+              {/* Card 1: Camera Network */}
+              <Card className="hover:border-blue-500/40 transition-all group">
+                <CardBody className="p-5">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Camera Network</span>
+                    <div className="w-9 h-9 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
+                      <Camera className="w-4.5 h-4.5" />
+                    </div>
+                  </div>
+                  <div className="text-2xl font-bold text-white mb-1">
+                    {onlineCams} <span className="text-sm font-normal text-slate-400">/ {totalCams}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-xs text-emerald-400 font-medium">
+                    <CheckCircle2 className="w-3.5 h-3.5" /> {onlineCams} Cameras Online & Ingesting
+                  </div>
+                </CardBody>
+              </Card>
 
-          {/* Camera System Health Overview (No Video Streams) */}
-          <div className="xl:col-span-2 glass rounded-2xl p-5">
-            <div className="section-header">
-              <h2 className="section-title">
-                <Camera className="w-4.5 h-4.5 text-primary-400" />
-                Camera Network Status
-              </h2>
-              <Link to="/cameras" className="flex items-center gap-1.5 text-xs text-primary-400 hover:text-primary-300 transition-colors">
+              {/* Card 2: Registered Profiles */}
+              <Card className="hover:border-teal-500/40 transition-all group">
+                <CardBody className="p-5">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Registered Persons</span>
+                    <div className="w-9 h-9 rounded-xl bg-teal-500/10 border border-teal-500/20 flex items-center justify-center text-teal-400">
+                      <Users className="w-4.5 h-4.5" />
+                    </div>
+                  </div>
+                  <div className="text-2xl font-bold text-white mb-1">{totalPersons}</div>
+                  <div className="text-xs text-slate-400 font-medium">
+                    Enrolled Identity Profiles
+                  </div>
+                </CardBody>
+              </Card>
+
+              {/* Card 3: Today's Detections */}
+              <Card className="hover:border-purple-500/40 transition-all group">
+                <CardBody className="p-5">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Detections Today</span>
+                    <div className="w-9 h-9 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
+                      <Activity className="w-4.5 h-4.5" />
+                    </div>
+                  </div>
+                  <div className="text-2xl font-bold text-white mb-1">{todayDetections}</div>
+                  <div className="flex items-center gap-1 text-xs text-blue-400 font-medium">
+                    <TrendingUp className="w-3.5 h-3.5" /> Active Face Recognition Logs
+                  </div>
+                </CardBody>
+              </Card>
+
+              {/* Card 4: Attention Alerts */}
+              <Card className="hover:border-amber-500/40 transition-all group">
+                <CardBody className="p-5">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Attention Events</span>
+                    <div className="w-9 h-9 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+                      <AlertTriangle className="w-4.5 h-4.5" />
+                    </div>
+                  </div>
+                  <div className="text-2xl font-bold text-white mb-1">{unknownAlerts}</div>
+                  <div className="text-xs text-amber-400 font-medium">
+                    Unregistered / Unknown Faces Logged
+                  </div>
+                </CardBody>
+              </Card>
+            </>
+          )}
+        </div>
+
+        {/* Live Camera Network Grid & Recent Activity */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Camera Network Section (2 cols) */}
+          <div className="lg:col-span-2 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                <Camera className="w-4 h-4 text-blue-500 dark:text-blue-400" /> Active Surveillance Cameras ({onlineCams}/{totalCams})
+              </h3>
+              <Link to="/cameras" className="text-xs font-semibold text-blue-500 hover:text-blue-400 dark:text-blue-400 dark:hover:text-blue-300 flex items-center gap-1">
                 Manage Cameras <ArrowRight className="w-3.5 h-3.5" />
               </Link>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {cameras.map((cam, idx) => (
-                <div key={cam.id || idx} className="glass rounded-xl p-3.5 border border-white/5 flex items-center justify-between hover:border-primary-500/20 transition-all">
-                  <div className="flex items-center gap-3">
-                    <div className={clsx(
-                      'w-9 h-9 rounded-lg flex items-center justify-center font-bold text-xs',
-                      cam.enabled ? 'bg-green-500/15 text-green-400' : 'bg-red-500/15 text-red-400'
-                    )}>
-                      <Camera className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <div className="text-xs font-semibold text-white">{cam.name}</div>
-                      <div className="text-[10px] text-slate-500">{cam.location} • ID: {cam.id}</div>
-                    </div>
-                  </div>
-                  <span className={clsx('text-[10px] px-2.5 py-1 rounded-full font-bold',
-                    cam.enabled ? 'badge-green' : 'badge-red'
-                  )}>
-                    {cam.enabled ? '● ONLINE' : '○ OFFLINE'}
-                  </span>
-                </div>
-              ))}
-              {cameras.length === 0 && (
-                <div className="col-span-full text-center py-8 text-slate-500 text-xs">
-                  No cameras registered in system.
-                </div>
-              )}
-            </div>
-          </div>
 
-
-          {/* System Resources */}
-          <div className="glass rounded-2xl p-5">
-            <h2 className="section-title mb-5">
-              <Activity className="w-4.5 h-4.5 text-teal-400" />
-              System Resources
-            </h2>
-            <div className="space-y-5">
-              <ResourceMeter label="CPU Usage" value={cpu} color="blue" />
-              <ResourceMeter label="GPU Usage" value={gpu} color="purple" />
-              <ResourceMeter label="RAM Usage" value={ram} color="teal" />
-
-              <div className="border-t border-white/5 pt-4 space-y-2.5">
-                {[
-                  { label: 'Model Status', value: 'ArcFace R50', ok: true },
-                  { label: 'Detector', value: 'SCRFD 10G', ok: true },
-                  { label: 'Database', value: health?.status === 'healthy' ? 'Connected' : 'Error', ok: health?.status === 'healthy' },
-                  { label: 'Recognition', value: `${health?.faiss?.is_loaded ? 'FAISS Ready' : 'Loading...'}`, ok: health?.faiss?.is_loaded },
-                ].map(item => (
-                  <div key={item.label} className="flex items-center justify-between text-xs">
-                    <span className="text-slate-400">{item.label}</span>
-                    <div className="flex items-center gap-1.5">
-                      {item.ok
-                        ? <CheckCircle className="w-3 h-3 text-green-400" />
-                        : <XCircle className="w-3 h-3 text-red-400" />}
-                      <span className={item.ok ? 'text-slate-300' : 'text-red-400'}>{item.value}</span>
-                    </div>
-                  </div>
-                ))}
+            {loading ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <CameraCardSkeleton />
+                <CameraCardSkeleton />
               </div>
-            </div>
+            ) : sortedCameras.length === 0 ? (
+              <EmptyState
+                icon={<Camera className="w-8 h-8" />}
+                title="No Cameras Configured"
+                description="Add your first CCTV RTSP stream or webcam to begin live facial recognition monitoring."
+                action={
+                  <Link to="/cameras">
+                    <Button variant="primary" size="sm">+ Add Camera</Button>
+                  </Link>
+                }
+              />
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {sortedCameras.slice(0, 4).map((cam) => {
+                  const isOnline = cam.enabled && cam.status !== 'OFFLINE'
+                  const camId = cam.id || cam.camera_id
+                  return (
+                    <div
+                      key={camId}
+                      className="group relative bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden hover:border-blue-500/40 transition-all shadow-md flex flex-col justify-between"
+                    >
+                      <div className="relative aspect-video bg-black flex items-center justify-center overflow-hidden">
+                        {isOnline ? (
+                          <img
+                            src={`/video_feed/${camId}`}
+                            alt={cam.name}
+                            className="w-full h-full object-contain"
+                            onError={(e) => {
+                              // Fallback on stream error
+                              (e.target as HTMLElement).style.display = 'none'
+                            }}
+                          />
+                        ) : (
+                          <div className="flex flex-col items-center justify-center text-slate-500 space-y-1">
+                            <Camera className="w-8 h-8 opacity-40" />
+                            <span className="text-[11px] font-semibold">Stream Offline</span>
+                          </div>
+                        )}
+
+                        {/* Top Badges */}
+                        <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5">
+                          <Badge variant={isOnline ? 'success' : 'danger'} dot size="sm">
+                            {isOnline ? 'LIVE' : 'OFFLINE'}
+                          </Badge>
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-black/60 text-slate-200 backdrop-blur-md border border-white/10">
+                            {cam.name}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="p-3 bg-slate-50/90 dark:bg-slate-900/90 flex items-center justify-between text-xs">
+                        <div className="truncate">
+                          <div className="font-bold text-slate-900 dark:text-white truncate">{cam.name}</div>
+                          <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">{cam.location || 'Default Location'}</div>
+                        </div>
+                        <Link to={`/live?cam=${camId}`}>
+                          <Button variant="ghost" size="sm" icon={<Eye className="w-3.5 h-3.5" />}>
+                            View
+                          </Button>
+                        </Link>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
+            {/* Recognition Trend Chart */}
+            <Card>
+              <CardHeader>
+                <CardTitle icon={<Activity className="w-4 h-4 text-blue-400" />}>
+                  Recognition Activity Trend
+                </CardTitle>
+                <Badge variant="neutral">24h History</Badge>
+              </CardHeader>
+              <CardBody className="p-4 h-56">
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={hourlyData}>
+                    <defs>
+                      <linearGradient id="colorRec" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.4} />
+                        <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                    <XAxis dataKey="time" stroke="#64748b" fontSize={10} />
+                    <YAxis stroke="#64748b" fontSize={10} />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: '#0f172a',
+                        borderColor: '#334155',
+                        borderRadius: '12px',
+                        fontSize: '11px',
+                        color: '#f8fafc'
+                      }}
+                    />
+                    <Area type="monotone" dataKey="recognitions" stroke="#3b82f6" strokeWidth={2} fillOpacity={1} fill="url(#colorRec)" />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </CardBody>
+            </Card>
           </div>
-        </div>
 
-        {/* Bottom Row: Chart + Recent Events */}
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-
-          {/* Recognition Trend */}
-          <div className="xl:col-span-2 glass rounded-2xl p-5">
-            <div className="section-header">
-              <h2 className="section-title">
-                <TrendingUp className="w-4.5 h-4.5 text-primary-400" />
-                Recognition Trend (Today)
-              </h2>
-            </div>
-            <ResponsiveContainer width="100%" height={200}>
-              <AreaChart data={hourlyData}>
-                <defs>
-                  <linearGradient id="recGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
-                  </linearGradient>
-                  <linearGradient id="unkGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#f59e0b" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
-                <XAxis dataKey="time" tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} tickLine={false} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} />
-                <Area type="monotone" dataKey="recognitions" name="Recognized" stroke="#3b82f6" fill="url(#recGrad)" strokeWidth={2} dot={false} />
-                <Area type="monotone" dataKey="unknown" name="Unknown" stroke="#f59e0b" fill="url(#unkGrad)" strokeWidth={2} dot={false} />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-
-          {/* Recent Recognitions */}
-          <div className="glass rounded-2xl p-5 overflow-hidden flex flex-col">
-            <div className="section-header">
-              <h2 className="section-title text-sm">
-                <Eye className="w-4 h-4 text-primary-400" />
-                Recent Recognitions
-              </h2>
-              <Link to="/events" className="text-xs text-primary-400 hover:text-primary-300 flex items-center gap-1">
-                All <ArrowRight className="w-3 h-3" />
+          {/* Right Column: Live Recognition Feed */}
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                <Radio className="w-4 h-4 text-emerald-500 dark:text-emerald-400 animate-pulse" /> Live Detection Stream
+              </h3>
+              <Link to="/events" className="text-xs font-semibold text-blue-500 hover:text-blue-400 dark:text-blue-400 dark:hover:text-blue-300">
+                View All Logs
               </Link>
             </div>
-            <div className="flex-1 overflow-y-auto space-y-2 -mr-1 pr-1">
-              {recentEvents.slice(0, 10).map(evt => (
-                <div key={evt.id} className="flex items-center gap-3 py-2 border-b border-white/5 last:border-0">
-                  <div className={clsx(
-                    'w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0',
-                    evt.person_id !== 'unknown' ? 'bg-primary-500/20 text-primary-400' : 'bg-red-500/20 text-red-400'
-                  )}>
-                    {evt.name?.[0]?.toUpperCase() ?? '?'}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs font-semibold text-slate-200 truncate">{evt.name}</div>
-                    <div className="text-[10px] text-slate-500">{evt.camera_id} • {evt.recognized_at?.split(' ')[1] ?? ''}</div>
-                  </div>
-                  <span className={clsx('conf-pill text-[10px]',
-                    evt.similarity > 0.85 ? 'conf-high' : evt.similarity > 0.7 ? 'conf-mid' : 'conf-low'
-                  )}>
-                    {Math.round(evt.similarity * 100)}%
-                  </span>
-                </div>
-              ))}
-              {recentEvents.length === 0 && (
-                <div className="text-center py-8 text-slate-500 text-xs">
-                  No recognition events yet
-                </div>
-              )}
-            </div>
+
+            <Card className="h-[580px] flex flex-col">
+              <CardBody className="p-3 flex-1 overflow-y-auto space-y-2.5">
+                {loading ? (
+                  <>
+                    <TableRowSkeleton />
+                    <TableRowSkeleton />
+                    <TableRowSkeleton />
+                  </>
+                ) : recentEvents.length === 0 ? (
+                  <EmptyState
+                    icon={<Eye className="w-7 h-7" />}
+                    title="No Detections Yet"
+                    description="Live face recognition matches will appear here automatically."
+                  />
+                ) : (
+                  recentEvents.slice(0, 15).map((event, idx) => (
+                    <DashboardEventItem key={event.id || idx} event={event} />
+                  ))
+                )}
+              </CardBody>
+            </Card>
           </div>
         </div>
       </div>

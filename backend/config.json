@@ -70,7 +70,31 @@
   },
 
   "registration": {
-    "sample_count": 5
+    "sample_count": 6,
+    "min_samples": 5,
+    "preferred_samples": 6,
+    "max_samples": 8,
+    "identity_guard_enabled": true,
+    "identity_threshold": 0.60,
+    "target_similarity_threshold": 0.55,
+    "target_reacquire_threshold": 0.60,
+    "duplicate_similarity_threshold": 0.88,
+    "target_lost_timeout": 3.0,
+    "capture_interval": 1.0,
+    "processing_fps": 8,
+    "min_detection_confidence": 0.45,
+    "min_face_width": 45,
+    "min_face_height": 45,
+    "min_sharpness": 18.0,
+    "min_brightness": 25.0,
+    "max_brightness": 235.0,
+    "spatial_weight": 0.20,
+    "identity_weight": 0.70,
+    "confidence_weight": 0.10,
+    "max_reference_embeddings": 5,
+    "frontal_yaw_range": [-0.12, 0.12],
+    "left_yaw_range": [-0.35, -0.12],
+    "right_yaw_range": [0.12, 0.35]
   },
 
   "pipeline": {

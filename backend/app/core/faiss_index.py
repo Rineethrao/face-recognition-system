@@ -110,6 +110,18 @@ class FAISSIndexManager:
             self.embeddings_cache = new_cache
             self.save()
 
+    def update_person_name(self, person_id: str, name: str):
+        """Update display name for all FAISS mapping entries belonging to a person."""
+        with self.lock:
+            updated = False
+            for info in self.id_map.values():
+                if info.get("person_id") == person_id:
+                    info["name"] = name
+                    updated = True
+            if updated:
+                self.save()
+            return updated
+
     def rebuild_index(self, db_session=None):
         """
         Rebuilds the FAISS index entirely from registered faces stored in the DB & disk.

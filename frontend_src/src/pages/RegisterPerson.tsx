@@ -1,18 +1,15 @@
 import { useState, useEffect, useRef } from 'react'
 import {
-  UserPlus, Upload, Camera, CheckCircle, AlertCircle, Trash2, X,
-  RefreshCw, Play, Shield, Mail, Phone, Building, User,
-  FileText, Check, AlertTriangle, Video, Sparkles, RefreshCcw, Layers
+  User, Camera, Video, Sparkles, CheckCircle2, AlertCircle, Trash2, X,
+  ArrowRight, ArrowLeft, ShieldCheck, Check, Cpu, Play, Eye, Upload, RefreshCw,
+  Image as ImageIcon
 } from 'lucide-react'
 import { TopBar } from '../components/TopBar'
+import { RegistrationWizardNav } from '../components/RegistrationWizardNav'
+import { AiAssistantPanel } from '../components/AiAssistantPanel'
 import { useNavigate } from 'react-router-dom'
-import {
-  createPerson,
-  getDetectedFacesMetadata,
-  type DetectedFaceMetadata
-} from '../lib/personApi'
-import { getCameras, api } from '../lib/cameraApi'
-import type { CameraConfig } from '../lib/cameraApi'
+import { api, getCameras, type CameraConfig } from '../lib/cameraApi'
+import { toast } from '../components/ui/Toast'
 import clsx from 'clsx'
 
 const ROLE_OPTIONS = [
@@ -26,288 +23,376 @@ const ROLE_OPTIONS = [
   'Missing Person',
 ]
 
-interface CapturedFace {
+interface GallerySample {
   id: string
-  file: File
-  previewUrl: string
-  blurScore: number
+  pose_bin: string
+  quality_score: number
   timestamp: string
-}
-
-// Convert base64 to File object
-function base64ToFile(dataurl: string, filename: string): File {
-  const arr = dataurl.split(',')
-  const mime = arr[0].match(/:(.*?);/)![1]
-  const bstr = atob(arr[1])
-  let n = bstr.length
-  const u8arr = new Uint8Array(n)
-  while (n--) {
-    u8arr[n] = bstr.charCodeAt(n)
-  }
-  return new File([u8arr], filename, { type: mime })
+  preview_url: string
+  method: string
 }
 
 export function RegisterPerson() {
   const navigate = useNavigate()
 
-  // --- Form State ---
-  const [firstName, setFirstName] = useState('')
-  const [lastName, setLastName] = useState('')
-  const [employeeId, setEmployeeId] = useState('')
-  const [role, setRole] = useState('Employee')
-  const [department, setDepartment] = useState('')
-  const [phone, setPhone] = useState('')
-  const [email, setEmail] = useState('')
-  const [notes, setNotes] = useState('')
+  // Wizard Step State (1 to 5)
+  const [currentStep, setCurrentStep] = useState<number>(1)
+
+  // Step 1: Person Metadata
+  const [personId, setPersonId] = useState<string>(`P_${Date.now().toString().slice(-5)}`)
+  const [firstName, setFirstName] = useState<string>('')
+  const [lastName, setLastName] = useState<string>('')
+  const [employeeId, setEmployeeId] = useState<string>('')
+  const [department, setDepartment] = useState<string>('')
+  const [designation, setDesignation] = useState<string>('')
+  const [role, setRole] = useState<string>('Employee')
+  const [phone, setPhone] = useState<string>('')
+  const [email, setEmail] = useState<string>('')
+  const [notes, setNotes] = useState<string>('')
   const [formErrors, setFormErrors] = useState<Record<string, string>>({})
 
-  // --- Capture Panel State ---
-  const [activeTab, setActiveTab] = useState<'webcam' | 'upload' | 'cctv'>('cctv')
-  
-  // Exactly 3 slots for Phase 1
-  const [capturedFaces, setCapturedFaces] = useState<(CapturedFace | null)[]>([null, null, null])
-  const [selectedSlotIndex, setSelectedSlotIndex] = useState<number | null>(null)
+  // Update Mode Selection
+  const [registeredPersons, setRegisteredPersons] = useState<any[]>([])
+  const [selectedExistingId, setSelectedExistingId] = useState<string>('')
 
-  // --- Webcam Capture ---
-  const [webcamStream, setWebcamStream] = useState<MediaStream | null>(null)
-  const [webcamError, setWebcamError] = useState<string | null>(null)
+  // Step 2: Capture Method ('WEBCAM' | 'CCTV' | 'UPLOAD')
+  const [captureMethod, setCaptureMethod] = useState<'WEBCAM' | 'CCTV' | 'UPLOAD'>('WEBCAM')
+
+  // Step 3: Stream & AI Assistant State
+  const [isCapturing, setIsCapturing] = useState<boolean>(false)
+  const [aiAssistant, setAiAssistant] = useState<{
+    face_detected: boolean
+    centered: boolean
+    sharp: boolean
+    lighting: boolean
+    eyes_visible: boolean
+    current_pose?: string
+    guidance?: string
+    status?: string
+    quality_score?: number
+  }>({
+    face_detected: false,
+    centered: false,
+    sharp: false,
+    lighting: false,
+    eyes_visible: false,
+    guidance: 'Position face inside the frame',
+    status: 'Ready for capture'
+  })
+
+  // Webcam Stream References & Multi-Camera Fallbacks
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [webcamStream, setWebcamStream] = useState<MediaStream | null>(null)
+  const [webcamError, setWebcamError] = useState<string | null>(null)
+  const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([])
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('')
 
-  // --- Live CCTV Capture ---
+  // CCTV Stream References & Face Selection State
   const [cameraList, setCameraList] = useState<CameraConfig[]>([])
   const [selectedCameraId, setSelectedCameraId] = useState<string>('')
-  const [cctvStatus, setCctvStatus] = useState<'Connecting' | 'Connected' | 'Disconnected'>('Disconnected')
-  const [fetchError, setFetchError] = useState<string | null>(null)
+  const [targetLocked, setTargetLocked] = useState<boolean>(false)
+  const [cctvFaces, setCctvFaces] = useState<any[]>([])
+  const [cctvStreamKey, setCctvStreamKey] = useState<number>(Date.now())
+  const [cctvError, setCctvError] = useState<boolean>(false)
   const cctvImgRef = useRef<HTMLImageElement>(null)
+  const [targetState, setTargetState] = useState<string>('WAITING_FOR_SELECTION')
+  const [targetDetails, setTargetDetails] = useState<any>(null)
+  const [imgLoaded, setImgLoaded] = useState<boolean>(false)
+  const [targetSamples, setTargetSamples] = useState<number>(6)
+  const [poseCoverage, setPoseCoverage] = useState<Record<string, boolean>>({})
+  const [hoveredFaceId, setHoveredFaceId] = useState<string | null>(null)
 
-  // --- Clickable Overlays & Metadata & Auto-Scroll Ref ---
-  const [activeFaces, setActiveFaces] = useState<DetectedFaceMetadata[]>([])
-  const [imgDims, setImgDims] = useState({ width: 0, height: 0, naturalWidth: 1280, naturalHeight: 720 })
-  const cropsContainerRef = useRef<HTMLDivElement>(null)
-
-  // --- Registered Persons List & Update Mode ---
-  const [registeredPersons, setRegisteredPersons] = useState<any[]>([])
-  const [selectedExistingPersonId, setSelectedExistingPersonId] = useState<string>('')
-  const [isUpdateMode, setIsUpdateMode] = useState<boolean>(false)
-
-  // --- Notifications & Alerts ---
-  const [localError, setLocalError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [loadingStep, setLoadingStep] = useState('')
-  const [successOpen, setSuccessOpen] = useState(false)
-  const [apiError, setApiError] = useState<string | null>(null)
-
-
-
-  // Fetch registered persons for update/re-registration selector
+  // Recalculate aspect-ratio coordinates dynamically on window resize
   useEffect(() => {
-    api.get('/persons')
-      .then((res) => {
-        if (res.data?.data) {
-          setRegisteredPersons(res.data.data)
-        }
-      })
-      .catch(() => {})
-  }, [])
-
-  const handleSelectExistingPerson = (personId: string) => {
-    setSelectedExistingPersonId(personId)
-    if (!personId) {
-      setIsUpdateMode(false)
-      setEmployeeId('')
-      setFirstName('')
-      setLastName('')
-      setDepartment('')
-      setRole('Employee')
-      setPhone('')
-      setEmail('')
-      setNotes('')
-      return
-    }
-
-    const match = registeredPersons.find((p) => p.person_id === personId)
-    if (match) {
-      setEmployeeId(match.person_id)
-      if (match.first_name || match.last_name) {
-        setFirstName(match.first_name || '')
-        setLastName(match.last_name || '')
-      } else if (match.name) {
-        const parts = match.name.trim().split(' ')
-        setFirstName(parts[0] || '')
-        setLastName(parts.slice(1).join(' ') || '')
-      }
-      setDepartment(match.department || '')
-      setRole(match.role || 'Employee')
-      setPhone(match.phone || '')
-      setEmail(match.email || '')
-      setNotes(match.notes || '')
-      setIsUpdateMode(true)
-    }
-  }
-
-  // Clear local error after 4 seconds
-  useEffect(() => {
-    if (localError) {
-      const t = setTimeout(() => setLocalError(null), 4000)
-      return () => clearTimeout(t)
-    }
-  }, [localError])
-
-  // Measure loaded stream dimensions
-  const handleImageLoad = () => {
-    if (cctvImgRef.current) {
-      setImgDims({
-        width: cctvImgRef.current.clientWidth,
-        height: cctvImgRef.current.clientHeight,
-        naturalWidth: cctvImgRef.current.naturalWidth || 1280,
-        naturalHeight: cctvImgRef.current.naturalHeight || 720
-      })
-    }
-  }
-
-  // Load configured CCTV cameras from backend
-  useEffect(() => {
-    setFetchError(null)
-    api.get('/cameras')
-      .then((res) => {
-        const responseJson = res.data
-        const data = responseJson.data || []
-        setCameraList(data)
-        if (data.length > 0) {
-          const firstEnabled = data.find((c: any) => c.enabled)
-          const defaultSelect = firstEnabled || data[0]
-          setSelectedCameraId(defaultSelect.id || defaultSelect.camera_id!)
-          setCctvStatus(defaultSelect.enabled ? 'Connected' : 'Disconnected')
-        }
-      })
-      .catch((err) => {
-        setFetchError(err.response?.data?.detail || err.response?.data?.message || err.message)
-      })
-
-    return () => {
-      stopWebcam()
-    }
-  }, [])
-
-  // Poll detected faces metadata for the active camera
-  useEffect(() => {
-    if (activeTab !== 'cctv' || !selectedCameraId || cctvStatus !== 'Connected') {
-      setActiveFaces([])
-      return
-    }
-
-    let isMounted = true
-    const poll = async () => {
-      try {
-        const faces = await getDetectedFacesMetadata(selectedCameraId)
-        if (isMounted) {
-          setActiveFaces(faces || [])
-          if (cctvImgRef.current) {
-            setImgDims({
-              width: cctvImgRef.current.clientWidth,
-              height: cctvImgRef.current.clientHeight,
-              naturalWidth: cctvImgRef.current.naturalWidth || 1280,
-              naturalHeight: cctvImgRef.current.naturalHeight || 720
-            })
-          }
-        }
-      } catch (err) {
-        console.error('Error fetching detected faces metadata:', err)
-      }
-    }
-
-    poll()
-    const timer = setInterval(poll, 450)
-
-    return () => {
-      isMounted = false
-      clearInterval(timer)
-    }
-  }, [activeTab, selectedCameraId, cctvStatus])
-
-  // Monitor resize to rescale face bounding box overlays
-  useEffect(() => {
-    const handleResize = () => {
-      if (cctvImgRef.current) {
-        setImgDims({
-          width: cctvImgRef.current.clientWidth,
-          height: cctvImgRef.current.clientHeight,
-          naturalWidth: cctvImgRef.current.naturalWidth || 1280,
-          naturalHeight: cctvImgRef.current.naturalHeight || 720
-        })
-      }
-    }
+    const handleResize = () => setImgLoaded(prev => !prev)
     window.addEventListener('resize', handleResize)
     return () => window.removeEventListener('resize', handleResize)
   }, [])
 
-  // Clean up webcam stream on tab change
-  useEffect(() => {
-    if (activeTab !== 'webcam') {
-      stopWebcam()
-    }
-  }, [activeTab])
+  const getOverlayBboxStyle = (bbox: number[]) => {
+    if (!cctvImgRef.current || !bbox || bbox.length !== 4) return {}
+    const img = cctvImgRef.current
+    const naturalWidth = img.naturalWidth
+    const naturalHeight = img.naturalHeight
+    const clientWidth = img.clientWidth
+    const clientHeight = img.clientHeight
 
-  // --- Capture Face Handler ---
-  const handleCaptureFace = (face: DetectedFaceMetadata) => {
-    // 1. Blur Validation
-    if (face.blur_score < 40.0) {
-      setLocalError('Captured image is blurry. Please select another frame.')
+    if (!naturalWidth || !naturalHeight || !clientWidth || !clientHeight) return {}
+
+    const imgRatio = naturalWidth / naturalHeight
+    const clientRatio = clientWidth / clientHeight
+
+    let visibleWidth = clientWidth
+    let visibleHeight = clientHeight
+    let offsetX = 0
+    let offsetY = 0
+
+    if (clientRatio > imgRatio) {
+      visibleWidth = clientHeight * imgRatio
+      offsetX = (clientWidth - visibleWidth) / 2
+    } else {
+      visibleHeight = clientWidth / imgRatio
+      offsetY = (clientHeight - visibleHeight) / 2
+    }
+
+    const scaleX = visibleWidth / naturalWidth
+    const scaleY = visibleHeight / naturalHeight
+
+    const left = bbox[0] * scaleX + offsetX
+    const top = bbox[1] * scaleY + offsetY
+    const width = (bbox[2] - bbox[0]) * scaleX
+    const height = (bbox[3] - bbox[1]) * scaleY
+
+    return {
+      position: 'absolute' as const,
+      left: `${left}px`,
+      top: `${top}px`,
+      width: `${width}px`,
+      height: `${height}px`
+    }
+  }
+
+  /** Keep a single overlay box per physical face (IoU dedupe). */
+  const dedupeFacesByIou = (faces: any[], iouThresh = 0.4) => {
+    const bboxIou = (a: number[], b: number[]) => {
+      if (!a || !b || a.length !== 4 || b.length !== 4) return 0
+      const ix1 = Math.max(a[0], b[0])
+      const iy1 = Math.max(a[1], b[1])
+      const ix2 = Math.min(a[2], b[2])
+      const iy2 = Math.min(a[3], b[3])
+      const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1)
+      if (inter <= 0) return 0
+      const areaA = Math.max(0, a[2] - a[0]) * Math.max(0, a[3] - a[1])
+      const areaB = Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1])
+      return inter / Math.max(areaA + areaB - inter, 1e-6)
+    }
+
+    const ranked = [...faces]
+      .filter(f => f?.bbox?.length === 4)
+      .sort((a, b) => {
+        const score = (f: any) => {
+          const [x1, y1, x2, y2] = f.bbox
+          const area = Math.max(0, x2 - x1) * Math.max(0, y2 - y1)
+          return (Number(f.confidence) || 0.5) * 2 + (Number(f.quality) || 0) + area / 10000
+        }
+        return score(b) - score(a)
+      })
+
+    const kept: any[] = []
+    for (const face of ranked) {
+      if (kept.some(k => bboxIou(face.bbox, k.bbox) >= iouThresh)) continue
+      kept.push(face)
+    }
+    return kept
+  }
+
+  const selectedCam = cameraList.find(c => (c.id || c.camera_id) === selectedCameraId)
+  const isSelectedCamOnline = selectedCam ? (selectedCam.enabled && selectedCam.status !== 'OFFLINE') : false
+
+  // Lock selected FACE in CCTV mode (face-first, not Track ID)
+  const handleSelectFace = async (face: any) => {
+    if (targetLocked) return
+    try {
+      const res = await api.post('/register/session/select_face', {
+        camera_id: selectedCameraId,
+        detection_id: face.detection_id,
+        bbox: face.bbox
+      })
+      if (res.data?.status === 'success') {
+        setTargetLocked(true)
+        setTargetState(res.data?.data?.state || 'TARGET_LOCKED')
+        if (res.data?.data?.target) setTargetDetails(res.data.data.target)
+        toast.success('Face selected', 'Target locked — automatic capture started')
+      }
+    } catch (err: any) {
+      console.error('Failed to select face:', err)
+      toast.error('Face select failed', err.response?.data?.detail || 'Try clicking the face again')
+    }
+  }
+
+  const handleUnlockTarget = async () => {
+    try {
+      await api.post('/register/session/track_select', {
+        track_id: -1,
+        camera_id: selectedCameraId
+      })
+      setTargetLocked(false)
+      setTargetState('WAITING_FOR_SELECTION')
+      setTargetDetails(null)
+    } catch (err) {
+      console.error('Failed to unlock target:', err)
+    }
+  }
+
+  const handleChangeTarget = async () => {
+    if (gallery.length > 0) {
+      const confirmRestart = window.confirm(
+        "Changing the face may mix identities. Restart capture and clear already captured samples?"
+      )
+      if (!confirmRestart) return
+
+      try {
+        for (const sample of gallery) {
+          await api.delete(`/register/session/sample/${sample.id}`)
+        }
+        setGallery([])
+      } catch (err) {
+        console.error("Failed to clear gallery samples:", err)
+      }
+    }
+    await handleUnlockTarget()
+  }
+
+  // Gallery State (Step 4)
+  const [gallery, setGallery] = useState<GallerySample[]>([])
+  const [uploadingFiles, setUploadingFiles] = useState<boolean>(false)
+
+  // Step 5: Commit Processing State
+  const [isProcessing, setIsProcessing] = useState<boolean>(false)
+  const [processingStage, setProcessingStage] = useState<string>('Initializing...')
+  const [registrationCompleted, setRegistrationCompleted] = useState<boolean>(false)
+  const [commitError, setCommitError] = useState<string | null>(null)
+
+  // Visual toast feedback on auto-captured sample
+  const prevGalleryCount = useRef(0)
+  useEffect(() => {
+    if (gallery.length > prevGalleryCount.current && prevGalleryCount.current >= 0 && gallery.length > 0) {
+      if (gallery.length > prevGalleryCount.current) {
+        const latest = gallery[gallery.length - 1]
+        toast.success(
+          `Sample Captured (${gallery.length}/${targetSamples})`,
+          `Pose: ${latest?.pose_bin || 'FACE'} • Quality Verified`
+        )
+      }
+    }
+    prevGalleryCount.current = gallery.length
+  }, [gallery.length, targetSamples])
+
+  // Load existing persons & CCTV cameras on mount
+  useEffect(() => {
+    api.get('/persons').then((res) => {
+      if (res.data?.data) setRegisteredPersons(res.data.data)
+    }).catch(() => {})
+
+    getCameras().then((data) => {
+      setCameraList(data)
+      if (data.length > 0) {
+        const active = data.find(c => c.enabled && c.status !== 'OFFLINE') || data[0]
+        setSelectedCameraId(active.id || active.camera_id || '')
+      }
+    }).catch(() => {})
+  }, [])
+
+  // CCTV Polling Loop (Active during Step 3 CCTV mode)
+  useEffect(() => {
+    if (currentStep !== 3 || captureMethod !== 'CCTV') return
+
+    setCctvError(false)
+    let isMounted = true
+
+    const pollDetectedFaces = async () => {
+      try {
+        const res = await api.get('/detected_faces')
+        const faces = res.data?.data || []
+        if (isMounted) {
+          const filtered = faces.filter((f: any) => !f.camera_id || f.camera_id === selectedCameraId)
+          setCctvFaces(dedupeFacesByIou(filtered, 0.4))
+        }
+      } catch (err) {}
+    }
+
+    const pollStatus = async () => {
+      try {
+        const res = await api.get('/register/status')
+        const data = res.data?.data
+        if (isMounted && data) {
+          if (data.ai_assistant) setAiAssistant(data.ai_assistant)
+          if (data.gallery) setGallery(data.gallery)
+          if (typeof data.target_samples === 'number') setTargetSamples(data.target_samples)
+          if (data.pose_coverage) setPoseCoverage(data.pose_coverage)
+          if (typeof data.target_locked === 'boolean') {
+            setTargetLocked(data.target_locked)
+          } else if (data.state) {
+            setTargetLocked(data.state !== 'WAITING_FOR_SELECTION' && data.state !== 'WAITING_FOR_TARGET')
+          }
+          if (data.state) setTargetState(data.state)
+          if (data.target) setTargetDetails(data.target)
+        }
+      } catch (err) {}
+    }
+
+    pollDetectedFaces()
+    pollStatus()
+
+    const intervalFaces = setInterval(pollDetectedFaces, 400)
+    const intervalStatus = setInterval(pollStatus, 500)
+
+    return () => {
+      isMounted = false
+      clearInterval(intervalFaces)
+      clearInterval(intervalStatus)
+    }
+  }, [currentStep, captureMethod, selectedCameraId])
+
+  // Enumerate Video Devices
+  const refreshVideoDevices = async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      const vDevs = devices.filter(d => d.kind === 'videoinput')
+      setVideoDevices(vDevs)
+      if (vDevs.length > 0 && !selectedDeviceId) {
+        setSelectedDeviceId(vDevs[0].deviceId)
+      }
+    } catch (e) {}
+  }
+
+  // Manage Webcam stream lifetime with robust constraints fallback
+  const startWebcam = async (deviceId?: string) => {
+    setWebcamError(null)
+    stopWebcam()
+
+    const targetDeviceId = deviceId || selectedDeviceId
+    const constraintList: MediaStreamConstraints[] = [
+      targetDeviceId ? { video: { deviceId: { exact: targetDeviceId } } } : null,
+      { video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' } },
+      { video: { width: { ideal: 640 }, height: { ideal: 480 } } },
+      { video: true }
+    ].filter(Boolean) as MediaStreamConstraints[]
+
+    let stream: MediaStream | null = null
+    let lastError: any = null
+
+    for (const constraints of constraintList) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints)
+        if (stream) break
+      } catch (err: any) {
+        lastError = err
+      }
+    }
+
+    if (!stream) {
+      console.error('Webcam acquisition failed:', lastError)
+      let msg = 'Unable to access webcam. Please check browser camera permissions.'
+      if (lastError?.name === 'NotAllowedError' || lastError?.name === 'PermissionDeniedError') {
+        msg = 'Camera access denied by browser. Click the camera icon in your browser address bar to grant permission.'
+      } else if (lastError?.name === 'NotReadableError' || lastError?.name === 'TrackStartError') {
+        msg = 'Webcam is currently in use by another app (Zoom, Teams, etc.). Please close other camera apps and click Retry.'
+      } else if (lastError?.name === 'NotFoundError') {
+        msg = 'No physical camera detected on your system.'
+      }
+      setWebcamError(msg)
       return
     }
 
-    // 2. Generate file object
-    const filename = `cctv_crop_${face.track_id}_${Date.now()}.jpg`
-    const file = base64ToFile(face.crop_base64, filename)
-    const previewUrl = URL.createObjectURL(file)
-
-    const newFace: CapturedFace = {
-      id: Math.random().toString(36).substr(2, 9),
-      file,
-      previewUrl,
-      blurScore: face.blur_score,
-      timestamp: new Date().toLocaleTimeString()
+    setWebcamStream(stream)
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream
+      videoRef.current.play().catch(() => {})
     }
-
-    setCapturedFaces((prev) => {
-      const updated = [...prev]
-      // If we are replacing/retaking a specific slot
-      if (selectedSlotIndex !== null) {
-        if (updated[selectedSlotIndex]) {
-          URL.revokeObjectURL(updated[selectedSlotIndex]!.previewUrl)
-        }
-        updated[selectedSlotIndex] = newFace
-        setSelectedSlotIndex(null)
-      } else {
-        // Find first empty slot
-        const emptyIdx = updated.findIndex((f) => f === null)
-        if (emptyIdx !== -1) {
-          updated[emptyIdx] = newFace
-        } else {
-          setLocalError('All 3 slots are filled. Delete or click Replace on a slot to update.')
-        }
-      }
-      return updated
-    })
-  }
-
-  // --- Webcam Methods ---
-  const startWebcam = async () => {
-    setWebcamError(null)
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 640, height: 480, facingMode: 'user' },
-        audio: false
-      })
-      setWebcamStream(stream)
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        videoRef.current.play().catch(() => { })
-      }
-    } catch (err: any) {
-      setWebcamError('Webcam not available. Check permissions or connection.')
-    }
+    refreshVideoDevices()
   }
 
   const stopWebcam = () => {
@@ -317,812 +402,996 @@ export function RegisterPerson() {
     }
   }
 
-  const captureFromWebcam = () => {
-    if (!videoRef.current || !canvasRef.current) return
-    const video = videoRef.current
-    const canvas = canvasRef.current
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
+  useEffect(() => {
+    if (currentStep === 3 && captureMethod === 'WEBCAM') {
+      startWebcam()
+    } else {
+      stopWebcam()
+    }
+    return () => stopWebcam()
+  }, [currentStep, captureMethod, selectedDeviceId])
 
-    canvas.width = video.videoWidth
-    canvas.height = video.videoHeight
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+  // Step 3: Frame Evaluation Loop for Webcam Mode
+  useEffect(() => {
+    if (currentStep !== 3 || captureMethod !== 'WEBCAM' || !webcamStream) return
 
-    canvas.toBlob((blob) => {
-      if (!blob) return
-      const timestampStr = new Date().toLocaleTimeString()
-      const filename = `webcam_${Date.now()}.jpg`
-      const file = new File([blob], filename, { type: 'image/jpeg' })
-      const previewUrl = URL.createObjectURL(file)
+    let intervalId: any = null
+    const evalFrame = async () => {
+      const video = videoRef.current
+      const canvas = canvasRef.current
+      if (!video || !canvas || video.readyState < 2) return
+      const vw = video.videoWidth || 640
+      const vh = video.videoHeight || 480
+      if (canvas.width !== vw) canvas.width = vw
+      if (canvas.height !== vh) canvas.height = vh
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      ctx.drawImage(video, 0, 0, vw, vh)
+      const b64 = canvas.toDataURL('image/jpeg', 0.8)
 
-      // Random sharp/blur simulation for webcam
-      const blurVal = 65.0
-
-      const newFace: CapturedFace = {
-        id: Math.random().toString(36).substr(2, 9),
-        file,
-        previewUrl,
-        blurScore: blurVal,
-        timestamp: timestampStr
-      }
-
-      setCapturedFaces((prev) => {
-        const updated = [...prev]
-        if (selectedSlotIndex !== null) {
-          if (updated[selectedSlotIndex]) URL.revokeObjectURL(updated[selectedSlotIndex]!.previewUrl)
-          updated[selectedSlotIndex] = newFace
-          setSelectedSlotIndex(null)
-        } else {
-          const emptyIdx = updated.findIndex((f) => f === null)
-          if (emptyIdx !== -1) {
-            updated[emptyIdx] = newFace
-          } else {
-            setLocalError('All 3 slots are filled. Delete or click Replace on a slot to update.')
-          }
+      try {
+        const res = await api.post('/register/session/frame', {
+          image_base64: b64,
+          method: 'WEBCAM'
+        })
+        const data = res.data?.data
+        if (data) {
+          if (data.ai_assistant) setAiAssistant(data.ai_assistant)
+          if (data.gallery) setGallery(data.gallery)
         }
-        return updated
+      } catch (err) {}
+    }
+
+    intervalId = setInterval(evalFrame, 400)
+    return () => clearInterval(intervalId)
+  }, [currentStep, captureMethod, webcamStream])
+
+  // Handle Photo File Uploads in Step 3
+  const handleFileUpload = async (files: FileList | null) => {
+    if (!files || files.length === 0) return
+    setUploadingFiles(true)
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i]
+      const reader = new FileReader()
+      await new Promise<void>((resolve) => {
+        reader.onload = async (e) => {
+          const b64 = e.target?.result as string
+          if (b64) {
+            try {
+              const res = await api.post('/register/session/frame', {
+                image_base64: b64,
+                method: 'UPLOAD'
+              })
+              const data = res.data?.data
+              if (data) {
+                if (data.ai_assistant) setAiAssistant(data.ai_assistant)
+                if (data.gallery) setGallery(data.gallery)
+              }
+            } catch (err) {}
+          }
+          resolve()
+        }
+        reader.readAsDataURL(file)
       })
-    }, 'image/jpeg', 0.95)
+    }
+    setUploadingFiles(false)
   }
 
-  // --- Upload Images Tab Methods ---
-  const handleFileDrop = (e: React.DragEvent<HTMLDivElement>) => {
+  // Handle Step 1 Validation & Proceed
+  const handleStep1Submit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (e.dataTransfer.files) {
-      addFilesToList(e.dataTransfer.files)
-    }
-  }
-
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      addFilesToList(e.target.files)
-    }
-  }
-
-  const addFilesToList = (fileList: FileList) => {
-    const validTypes = ['image/jpeg', 'image/png', 'image/jpg']
-    Array.from(fileList).forEach((file) => {
-      if (!validTypes.includes(file.type)) {
-        alert('Unsupported file type. Please upload JPG, PNG, or JPEG.')
-        return
-      }
-
-      const previewUrl = URL.createObjectURL(file)
-      const newFace: CapturedFace = {
-        id: Math.random().toString(36).substr(2, 9),
-        file,
-        previewUrl,
-        blurScore: 85.0,
-        timestamp: new Date().toLocaleTimeString()
-      }
-
-      setCapturedFaces((prev) => {
-        const updated = [...prev]
-        if (selectedSlotIndex !== null) {
-          if (updated[selectedSlotIndex]) URL.revokeObjectURL(updated[selectedSlotIndex]!.previewUrl)
-          updated[selectedSlotIndex] = newFace
-          setSelectedSlotIndex(null)
-        } else {
-          const emptyIdx = updated.findIndex((f) => f === null)
-          if (emptyIdx !== -1) {
-            updated[emptyIdx] = newFace
-          } else {
-            setLocalError('All 3 slots are filled. Delete or click Replace on a slot to update.')
-          }
-        }
-        return updated
-      })
-    })
-  }
-
-  // --- Slot removal ---
-  const removeFaceSlot = (index: number) => {
-    setCapturedFaces((prev) => {
-      const updated = [...prev]
-      if (updated[index]) {
-        URL.revokeObjectURL(updated[index]!.previewUrl)
-        updated[index] = null
-      }
-      return updated
-    })
-    if (selectedSlotIndex === index) {
-      setSelectedSlotIndex(null)
-    }
-  }
-
-  // --- Form & Submit Validation ---
-  const validateForm = (): boolean => {
     const errors: Record<string, string> = {}
     if (!firstName.trim()) errors.firstName = 'First name is required'
     if (!lastName.trim()) errors.lastName = 'Last name is required'
-    if (!employeeId.trim()) errors.employeeId = 'Employee ID is required'
-    if (!department.trim()) errors.department = 'Department is required'
 
-    setFormErrors(errors)
-    return Object.keys(errors).length === 0
-  }
-
-  const handleRegister = async () => {
-    if (!validateForm()) return
-
-    // Verify we have exactly 3 face images
-    const filledCount = capturedFaces.filter(f => f !== null).length
-    if (filledCount < 3) {
-      setLocalError('Capture at least 3 clear face images.')
+    if (Object.keys(errors).length > 0) {
+      setFormErrors(errors)
       return
     }
 
-    setLoading(true)
-    setApiError(null)
-    setLoadingStep('Uploading face photos to AI Vision engine...')
-
-    const payload = {
-      person_id: employeeId.trim(),
-      first_name: firstName.trim(),
-      last_name: lastName.trim(),
-      department: department.trim(),
-      role,
-      phone: phone.trim() || undefined,
-      email: email.trim() || undefined,
-      notes: notes.trim() || undefined,
-      files: capturedFaces.map((f) => f!.file)
-    }
+    setFormErrors({})
+    const reqPersonId = employeeId.trim() || personId
 
     try {
-      setTimeout(() => setLoadingStep('Generating 512D ArcFace embeddings...'), 1000)
-      setTimeout(() => setLoadingStep('Updating FAISS vector search index...'), 2400)
-
-      await createPerson(payload)
-
-      setTimeout(() => {
-        setLoading(false)
-        setSuccessOpen(true)
-      }, 3500)
-
+      await api.post('/register/session/start', {
+        person_id: reqPersonId,
+        first_name: firstName.trim(),
+        last_name: lastName.trim(),
+        employee_id: employeeId.trim() || reqPersonId,
+        department: department.trim(),
+        designation: designation.trim(),
+        role,
+        phone: phone.trim(),
+        email: email.trim(),
+        notes: notes.trim()
+      })
+      setCurrentStep(2)
     } catch (err: any) {
-      setLoading(false)
-      const msg = err.response?.data?.detail || err.response?.data?.message || err.message || 'Registration failed.'
-      setApiError(msg)
+      setFormErrors({ submit: err.response?.data?.detail || 'Failed to start session' })
     }
   }
 
-  const isFormValid = firstName.trim() && lastName.trim() && employeeId.trim() && department.trim()
-  const hasThreeFaces = capturedFaces.filter((f) => f !== null).length === 3
-  const canSubmit = isFormValid && hasThreeFaces
+  // Handle Step 4 -> Step 5 Final Commit
+  const handleCommitRegistration = async () => {
+    setCurrentStep(5)
+    setIsProcessing(true)
+    setCommitError(null)
+
+    const stages = [
+      'Aligning Facial Landmarks (5-Point Warp)...',
+      'Generating 512-D ArcFace Identity Embeddings...',
+      'Running Cross-Database Duplicate Identity Check...',
+      'Writing Quality Gallery & Disk Snapshots...',
+      'Updating In-Memory FAISS Vector Index...'
+    ]
+
+    for (let i = 0; i < stages.length; i++) {
+      setProcessingStage(stages[i])
+      await new Promise(r => setTimeout(r, 600))
+    }
+
+    try {
+      const res = await api.post('/register/session/commit')
+      if (res.data?.status === 'success') {
+        setRegistrationCompleted(true)
+      } else {
+        setCommitError(res.data?.message || 'Registration failed')
+      }
+    } catch (err: any) {
+      setCommitError(err.response?.data?.detail || err.message || 'Error committing registration')
+    } finally {
+      setIsProcessing(false)
+    }
+  }
+
+  const handleRemoveSample = async (sampleId: string) => {
+    try {
+      const res = await api.delete(`/register/session/sample/${sampleId}`)
+      if (res.data?.data?.gallery) {
+        setGallery(res.data.data.gallery)
+      }
+    } catch (err) {}
+  }
 
   return (
-    <div className="flex flex-col h-full overflow-hidden bg-slate-950 text-slate-100">
-      <TopBar title="Register Person" />
+    <div className="flex flex-col h-full overflow-hidden bg-transparent text-slate-900 dark:text-slate-100 registration-form-page">
+      <TopBar title="Enterprise Face Registration" />
 
-      {/* Main Split Grid Viewport */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-6 max-w-7xl mx-auto w-full pb-28">
+      <main className="flex-1 overflow-y-auto max-w-7xl w-full mx-auto p-4 md:p-6 flex flex-col pb-10">
+        {/* Wizard Step Progress Navigation */}
+        <RegistrationWizardNav
+          currentStep={currentStep}
+          onStepClick={(s) => s < currentStep && setCurrentStep(s)}
+        />
 
-        {/* Top Header Section */}
-        <div className="flex justify-between items-start">
-          <div>
-            <h2 className="text-xl font-bold text-white flex items-center gap-2.5">
-              <UserPlus className="w-5.5 h-5.5 text-primary-400" />
-              CCTV Face Registration Wizard
-            </h2>
-            <p className="text-xs text-slate-400 mt-1 animate-pulse">
-              Register a new person from live CCTV. Exactly 3 clear face images are required.
-            </p>
-          </div>
-          
-          {/* Status Indicator / Toast messages */}
-          {localError && (
-            <div className="px-4 py-2 rounded-xl bg-red-500/15 border border-red-500/25 text-xs text-red-300 flex items-center gap-2 shadow-lg animate-bounce">
-              <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
-              <span>{localError}</span>
-            </div>
-          )}
-        </div>
+        {/* Hidden Canvas & File Inputs */}
+        <canvas ref={canvasRef} className="hidden" />
+        <input
+          type="file"
+          ref={fileInputRef}
+          multiple
+          accept="image/*"
+          className="hidden"
+          onChange={(e) => handleFileUpload(e.target.files)}
+        />
 
-        {/* Split grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-
-          {/* Left Column Form: 40% (span 2 of 5) */}
-          <div className="lg:col-span-2 glass rounded-2xl p-5 border border-white/5 space-y-5 flex flex-col justify-between">
-            <div className="space-y-4">
-              <div className="flex items-center justify-between pb-3 border-b border-white/5">
-                <div className="flex items-center gap-2">
-                  <Shield className="w-4 h-4 text-primary-400" />
-                  <span className="text-xs font-bold text-slate-200 tracking-wider">PERSON DETAILS</span>
-                </div>
-                {isUpdateMode && (
-                  <span className="text-[10px] font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/25">
-                    ● Update / Re-register Mode
-                  </span>
-                )}
+        {/* STEP 1: PERSON INFORMATION */}
+        {currentStep === 1 && (
+          <div className="bg-slate-900/70 border border-slate-800 rounded-3xl p-6 md:p-8 shadow-2xl backdrop-blur-xl max-w-4xl mx-auto w-full">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-5 mb-6">
+              <div>
+                <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                  <User className="w-5 h-5 text-blue-400" /> Step 1: Person Metadata & Profile
+                </h2>
+                <p className="text-xs text-slate-400 mt-1">Fill out employee information to initialize the registration gallery.</p>
               </div>
 
-              {/* Existing Registered Person Update Selector */}
+              {/* Selector for updating existing person */}
               {registeredPersons.length > 0 && (
-                <div>
-                  <label className="text-[11px] font-bold text-slate-400 mb-1.5 block">
-                    Update Existing Person (Optional)
-                  </label>
+                <div className="flex items-center gap-2 bg-slate-800/80 border border-slate-700 px-3 py-1.5 rounded-xl text-xs">
+                  <span className="text-slate-400">Re-register / Edit:</span>
                   <select
-                    className="input-field custom-select cursor-pointer text-xs py-2 bg-slate-900/90 border-amber-500/30"
-                    value={selectedExistingPersonId}
-                    onChange={(e) => handleSelectExistingPerson(e.target.value)}
+                    value={selectedExistingId}
+                    onChange={(e) => {
+                      setSelectedExistingId(e.target.value)
+                      const match = registeredPersons.find(p => p.person_id === e.target.value)
+                      if (match) {
+                        setPersonId(match.person_id)
+                        const parts = (match.name || '').split(' ')
+                        setFirstName(match.first_name || parts[0] || '')
+                        setLastName(match.last_name || parts.slice(1).join(' ') || '')
+                        setEmployeeId(match.person_id)
+                        setDepartment(match.department || '')
+                        setRole(match.role || 'Employee')
+                      }
+                    }}
+                    className="bg-transparent text-slate-200 font-semibold focus:outline-none"
                   >
-                    <option value="">-- Register New Person (Or select existing to update) --</option>
-                    {registeredPersons.map((p) => (
-                      <option key={p.person_id} value={p.person_id}>
-                        {p.name} ({p.person_id}) — {p.department || 'No Dept'} [{p.embedding_count} sample(s)]
+                    <option value="" className="bg-slate-900">New Profile</option>
+                    {registeredPersons.map(p => (
+                      <option key={p.person_id} value={p.person_id} className="bg-slate-900">
+                        {p.name} ({p.person_id})
                       </option>
                     ))}
                   </select>
                 </div>
               )}
+            </div>
 
-              {isUpdateMode && (
-                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-200 space-y-1 animate-fade-in">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-amber-300">Updating Registered Profile</span>
-                    <button
-                      type="button"
-                      onClick={() => handleSelectExistingPerson('')}
-                      className="text-[10px] font-bold text-amber-400 hover:underline cursor-pointer"
-                    >
-                      Clear & Register New
-                    </button>
-                  </div>
-                  <p className="text-[10px] text-slate-300 leading-relaxed">
-                    Submitting new face crops will update <strong>{firstName} {lastName} ({employeeId})</strong>'s profile by replacing old embeddings with higher quality samples for faster recognition!
-                  </p>
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 gap-3.5">
+            <form onSubmit={handleStep1Submit} className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                 <div>
-                  <label className="text-[11px] font-bold text-slate-400 mb-1.5 block">First Name *</label>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                    First Name <span className="text-rose-400">*</span>
+                  </label>
                   <input
-                    className={clsx('input-field text-xs py-2', formErrors.firstName && 'border-red-500/50')}
-                    placeholder="John"
+                    type="text"
+                    required
                     value={firstName}
                     onChange={(e) => setFirstName(e.target.value)}
+                    placeholder="John"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-blue-500 transition-colors"
                   />
-                  {formErrors.firstName && <span className="text-[10px] text-red-400 mt-1 block">{formErrors.firstName}</span>}
+                  {formErrors.firstName && <p className="text-xs text-rose-400 mt-1">{formErrors.firstName}</p>}
                 </div>
+
                 <div>
-                  <label className="text-[11px] font-bold text-slate-400 mb-1.5 block">Last Name *</label>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                    Last Name <span className="text-rose-400">*</span>
+                  </label>
                   <input
-                    className={clsx('input-field text-xs py-2', formErrors.lastName && 'border-red-500/50')}
-                    placeholder="Smith"
+                    type="text"
+                    required
                     value={lastName}
                     onChange={(e) => setLastName(e.target.value)}
+                    placeholder="Doe"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-blue-500 transition-colors"
                   />
-                  {formErrors.lastName && <span className="text-[10px] text-red-400 mt-1 block">{formErrors.lastName}</span>}
+                  {formErrors.lastName && <p className="text-xs text-rose-400 mt-1">{formErrors.lastName}</p>}
                 </div>
-              </div>
 
-              <div className="grid grid-cols-2 gap-3.5">
                 <div>
-                  <label className="text-[11px] font-bold text-slate-400 mb-1.5 block">Employee / Person ID *</label>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                    Employee / Person ID
+                  </label>
                   <input
-                    className={clsx('input-field font-mono text-xs py-2', formErrors.employeeId && 'border-red-500/50')}
-                    placeholder="EMP001"
+                    type="text"
                     value={employeeId}
-                    onChange={(e) => {
-                      const val = e.target.value
-                      setEmployeeId(val)
-                      const match = registeredPersons.find((p) => p.person_id.toLowerCase() === val.trim().toLowerCase())
-                      if (match) {
-                        setSelectedExistingPersonId(match.person_id)
-                        setIsUpdateMode(true)
-                        if (match.first_name) setFirstName(match.first_name)
-                        if (match.last_name) setLastName(match.last_name)
-                        if (match.department) setDepartment(match.department)
-                        if (match.role) setRole(match.role)
-                      }
-                    }}
+                    onChange={(e) => setEmployeeId(e.target.value)}
+                    placeholder={personId}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-blue-500 transition-colors"
                   />
-                  {formErrors.employeeId && <span className="text-[10px] text-red-400 mt-1 block">{formErrors.employeeId}</span>}
                 </div>
+
                 <div>
-                  <label className="text-[11px] font-bold text-slate-400 mb-1.5 block">Role Class *</label>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                    System Role
+                  </label>
                   <select
-                    className="input-field custom-select cursor-pointer text-xs py-2"
                     value={role}
                     onChange={(e) => setRole(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-100 focus:outline-none focus:border-blue-500 transition-colors"
                   >
-                    {ROLE_OPTIONS.map((opt) => (
-                      <option key={opt} value={opt}>{opt}</option>
-                    ))}
+                    {ROLE_OPTIONS.map(r => <option key={r} value={r}>{r}</option>)}
                   </select>
                 </div>
-              </div>
 
-              <div>
-                <label className="text-[11px] font-bold text-slate-400 mb-1.5 block">Department *</label>
-                <input
-                  className={clsx('input-field text-xs py-2', formErrors.department && 'border-red-500/50')}
-                  placeholder="Security Ops, General Administration"
-                  value={department}
-                  onChange={(e) => setDepartment(e.target.value)}
-                />
-                {formErrors.department && <span className="text-[10px] text-red-400 mt-1 block">{formErrors.department}</span>}
-              </div>
-
-              <div className="grid grid-cols-2 gap-3.5">
                 <div>
-                  <label className="text-[11px] font-bold text-slate-400 mb-1.5 block">Phone</label>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                    Department
+                  </label>
                   <input
-                    className="input-field text-xs py-2"
-                    placeholder="+91 99999 99999"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
+                    type="text"
+                    value={department}
+                    onChange={(e) => setDepartment(e.target.value)}
+                    placeholder="Engineering / Security"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-blue-500 transition-colors"
                   />
                 </div>
+
                 <div>
-                  <label className="text-[11px] font-bold text-slate-400 mb-1.5 block">Email</label>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                    Designation
+                  </label>
                   <input
-                    className="input-field text-xs py-2"
-                    placeholder="john@company.com"
+                    type="text"
+                    value={designation}
+                    onChange={(e) => setDesignation(e.target.value)}
+                    placeholder="Senior Specialist"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-blue-500 transition-colors"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                    Email Address
+                  </label>
+                  <input
+                    type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
+                    placeholder="john.doe@company.com"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-blue-500 transition-colors"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                    Phone Number
+                  </label>
+                  <input
+                    type="text"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    placeholder="+1 (555) 000-0000"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-blue-500 transition-colors"
                   />
                 </div>
               </div>
 
-              <div>
-                <label className="text-[11px] font-bold text-slate-400 mb-1.5 block">Notes</label>
-                <textarea
-                  className="input-field text-xs py-2 resize-none"
-                  rows={2}
-                  placeholder="Additional background or watchlist info..."
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                />
-              </div>
-            </div>
-
-            {/* Validation warning helper block */}
-            {!hasThreeFaces && (
-              <div className="p-3.5 rounded-xl bg-yellow-500/10 border border-yellow-500/20 text-[11px] text-yellow-300 flex items-start gap-2">
-                <AlertCircle className="w-4 h-4 text-yellow-400 flex-shrink-0 mt-0.5" />
-                <div>
-                  Capture at least <strong>3 clear face images</strong>. Current: {capturedFaces.filter(f => f !== null).length}/3.
-                </div>
-              </div>
-            )}
-            
-            {hasThreeFaces && (
-              <div className="p-3.5 rounded-xl bg-green-500/10 border border-green-500/20 text-[11px] text-green-300 flex items-start gap-2">
-                <CheckCircle className="w-4 h-4 text-green-400 flex-shrink-0 mt-0.5" />
-                <div>
-                  Ready to register! 3 high-quality face samples isolated.
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Right Side Capture Options: 60% (span 3 of 5) */}
-          <div className="lg:col-span-3 glass rounded-2xl p-5 border border-white/5 space-y-5 flex flex-col justify-between">
-            <div className="space-y-4">
-
-              {/* Tab selectors */}
-              <div className="flex items-center justify-between border-b border-white/5 pb-2">
-                <div className="flex gap-2 p-1 glass rounded-xl">
-                  {[
-                    { id: 'cctv', label: 'Live CCTV Camera', icon: Camera },
-                    { id: 'webcam', label: 'Webcam', icon: Video },
-                    { id: 'upload', label: 'Upload Files', icon: Upload }
-                  ].map((tab) => {
-                    const Icon = tab.icon
-                    return (
-                      <button
-                        key={tab.id}
-                        onClick={() => {
-                          setActiveTab(tab.id as any)
-                          setSelectedSlotIndex(null)
-                        }}
-                        className={clsx(
-                          'px-4 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer',
-                          activeTab === tab.id
-                            ? 'bg-primary-500 text-white shadow-lg'
-                            : 'text-slate-400 hover:text-slate-200'
-                        )}
-                      >
-                        <Icon className="w-3.5 h-3.5" />
-                        {tab.label}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-
-              {/* ── TAB 1: LIVE CCTV STREAM CAPTURE (TAP TO SELECT) ── */}
-              {activeTab === 'cctv' && (
-                <div className="space-y-4 animate-fade-in">
-                  {fetchError && (
-                    <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-xs text-red-300 flex items-center gap-2">
-                      <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
-                      <span>Failed to fetch cameras: {fetchError}</span>
-                    </div>
-                  )}
-
-                  <div className="flex gap-2">
-                    <select
-                      className="input-field custom-select cursor-pointer text-xs py-2"
-                      value={selectedCameraId}
-                      onChange={(e) => {
-                        setSelectedCameraId(e.target.value)
-                        const cam = cameraList.find(c => (c.id || c.camera_id) === e.target.value)
-                        setCctvStatus(cam?.enabled ? 'Connected' : 'Disconnected')
-                        setActiveFaces([])
-                      }}
-                    >
-                      {cameraList.map((cam) => {
-                        const idValue = cam.id || cam.camera_id!
-                        return (
-                          <option key={idValue} value={idValue}>
-                            {cam.name} ({cam.location}) — {cam.enabled ? 'Enabled' : 'Disabled'}
-                          </option>
-                        )
-                      })}
-                      {cameraList.length === 0 && !fetchError && (
-                        <option value="">No Active CCTV Streams Registered</option>
-                      )}
-                    </select>
-                  </div>
-
-                  {/* Side-by-Side Grid: Video Feed (Left) & Vertical Detected Face Crops Sidebar (Right) */}
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-start">
-                    {/* Live Stream Viewport (3 Cols) */}
-                    <div className="md:col-span-3 relative aspect-video bg-slate-900 rounded-xl overflow-hidden border border-white/10 flex items-center justify-center group select-none">
-                      {selectedCameraId && cctvStatus === 'Connected' ? (
-                        <img
-                          ref={cctvImgRef}
-                          src={`/video_feed/${selectedCameraId}`}
-                          alt="CCTV stream"
-                          className="w-full h-full object-cover"
-                          onLoad={handleImageLoad}
-                          onError={() => setCctvStatus('Disconnected')}
-                        />
-                      ) : (
-                        <div className="flex flex-col items-center justify-center gap-2 text-slate-500">
-                          <Camera className="w-10 h-10 animate-pulse text-slate-600" />
-                          <span className="text-xs">No Active Stream Feed</span>
-                        </div>
-                      )}
-
-                      {/* Status indicator badge */}
-                      <div className="absolute top-3 left-3 flex items-center gap-2 pointer-events-none">
-                        <span className={clsx(
-                          'text-[9px] font-bold px-2 py-0.5 rounded-full border shadow-md backdrop-blur',
-                          cctvStatus === 'Connected'
-                            ? 'badge-green border-green-500/20'
-                            : 'badge-red border-red-500/20'
-                        )}>
-                          {cctvStatus === 'Connected' ? '● Live CCTV' : '○ Disconnected'}
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Vertical Detected Face Crops Panel (1 Col) */}
-                    <div className="md:col-span-1 glass rounded-xl border border-white/10 p-2.5 space-y-2 flex flex-col h-full min-h-[280px] max-h-[350px]">
-                      <div className="flex items-center justify-between border-b border-white/5 pb-1.5">
-                        <span className="text-[10px] font-bold text-slate-300 tracking-wider flex items-center gap-1">
-                          <User className="w-3 h-3 text-primary-400" />
-                          DETECTED ({activeFaces.length})
-                        </span>
-                        <span className="text-[8px] text-slate-400">Tap to add</span>
-                      </div>
-
-                      <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
-                        {activeFaces.map((face) => (
-                          <div
-                            key={face.track_id}
-                            onClick={() => handleCaptureFace(face)}
-                            className={clsx(
-                              "p-1.5 rounded-lg border bg-slate-900/90 hover:border-green-400 hover:scale-102 flex items-center gap-2 cursor-pointer transition-all group",
-                              face.blur_score >= 40.0 ? "border-white/10" : "border-red-500/30 opacity-60"
-                            )}
-                          >
-                            <div className="w-10 h-10 aspect-square rounded-md overflow-hidden bg-slate-950 flex-shrink-0 relative border border-white/10">
-                              <img src={face.crop_base64} alt="Crop" className="w-full h-full object-cover" />
-                            </div>
-
-                            <div className="flex-1 min-w-0 font-mono text-[9px] space-y-0.5">
-                              <div className="flex justify-between items-center">
-                                <span className="font-bold text-slate-200 truncate">ID #{face.track_id}</span>
-                                <span className={clsx(
-                                  "px-1 py-0.2 rounded font-bold text-[8px]",
-                                  face.blur_score >= 40.0 ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"
-                                )}>
-                                  Q:{Math.round(face.blur_score)}
-                                </span>
-                              </div>
-
-                              <div className="text-slate-400 truncate text-[8px]">
-                                {face.is_recognized && face.name ? (
-                                  <span className="text-green-400 font-bold">{face.name}</span>
-                                ) : (
-                                  <span className="text-slate-500">Unregistered</span>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-
-                        {activeFaces.length === 0 && (
-                          <div className="flex flex-col items-center justify-center h-44 text-center p-2 text-slate-500">
-                            <Camera className="w-5 h-5 mb-1.5 opacity-30 animate-pulse" />
-                            <span className="text-[10px] italic">No active face crops detected in current stream view.</span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                  
-                  <div className="p-3 bg-primary-500/10 border border-primary-500/15 rounded-xl flex items-center gap-2.5 mt-3">
-                    <Sparkles className="w-4 h-4 text-primary-400 flex-shrink-0 animate-pulse" />
-                    <p className="text-[11px] text-slate-300">
-                      <strong>How to register:</strong> Select a face crop from the active face thumbnails above to add it to your Captured Face Gallery slots below, then fill in the form and register!
-                    </p>
-                  </div>
+              {formErrors.submit && (
+                <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-xs text-rose-300">
+                  {formErrors.submit}
                 </div>
               )}
 
-              {/* ── TAB 2: WEBCAM CAPTURE ── */}
-              {activeTab === 'webcam' && (
-                <div className="space-y-4 animate-fade-in">
-                  <div className="relative aspect-video bg-slate-900 rounded-xl overflow-hidden border border-white/10 flex items-center justify-center group">
-                    {webcamStream ? (
-                      <video
-                        ref={videoRef}
-                        className="w-full h-full object-cover scale-x-[-1]"
-                        playsInline
-                        muted
-                      />
-                    ) : (
-                      <div className="flex flex-col items-center justify-center gap-3 text-slate-500 text-center p-6">
-                        <Video className="w-12 h-12 text-slate-600 animate-pulse" />
-                        <div className="text-xs font-semibold text-slate-300">Webcam Not Running</div>
-                        <p className="text-[11px] text-slate-500 max-w-xs">Click Start Camera below to initialize local webcam capture.</p>
-                      </div>
-                    )}
-
-                    <canvas ref={canvasRef} className="hidden" />
-
-                    {webcamError && (
-                      <div className="absolute inset-0 bg-black/85 flex items-center justify-center p-4">
-                        <div className="text-center space-y-2">
-                          <AlertTriangle className="w-8 h-8 text-red-500 mx-auto" />
-                          <div className="text-xs font-bold text-red-400">{webcamError}</div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="flex gap-2.5">
-                    {!webcamStream ? (
-                      <button onClick={startWebcam} className="btn-primary flex-1 justify-center py-2.5 text-xs">
-                        <Play className="w-3.5 h-3.5" /> Start Camera
-                      </button>
-                    ) : (
-                      <>
-                        <button onClick={captureFromWebcam} className="btn-primary flex-1 justify-center py-2.5 text-xs">
-                          <Camera className="w-3.5 h-3.5" /> Capture Face Crop
-                        </button>
-                        <button onClick={stopWebcam} className="btn-secondary py-2.5 text-xs px-4">
-                          Stop
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* ── TAB 3: FILE UPLOAD ── */}
-              {activeTab === 'upload' && (
-                <div className="space-y-4 animate-fade-in">
-                  <div
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={handleFileDrop}
-                    className="border-2 border-dashed border-white/10 rounded-xl aspect-video bg-slate-900/40 hover:bg-slate-900/70 hover:border-primary-500/40 transition-all flex flex-col items-center justify-center gap-3 p-6 text-slate-500 cursor-pointer relative group"
-                  >
-                    <input
-                      type="file"
-                      multiple
-                      accept="image/jpeg,image/png,image/jpg"
-                      onChange={handleFileSelect}
-                      className="absolute inset-0 opacity-0 cursor-pointer"
-                    />
-                    <div className="w-12 h-12 rounded-full glass border border-white/5 flex items-center justify-center text-primary-400 group-hover:scale-110 transition-transform">
-                      <Upload className="w-5.5 h-5.5" />
-                    </div>
-                    <div className="text-center">
-                      <span className="text-xs font-bold text-slate-200 block">Drag & Drop face photos here</span>
-                      <span className="text-[10px] text-slate-500 mt-1 block">Supports JPG, JPEG, PNG</span>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-            </div>
-          </div>
-        </div>
-
-        {/* Captured Face Gallery (3 targeted slots) */}
-        <div className="glass rounded-2xl p-5 border border-white/5 space-y-4">
-          <div className="flex items-center justify-between border-b border-white/5 pb-2">
-            <h3 className="text-xs font-bold text-slate-200 tracking-wider flex items-center gap-1.5">
-              <Layers className="w-4 h-4 text-primary-400" />
-              CAPTURED FACE GALLERY (EXACTLY 3 CLEAR IMAGES REQUIRED)
-            </h3>
-            <span className="text-[10px] text-slate-500">
-              {selectedSlotIndex !== null 
-                ? `[Replace mode active] Next capture will overwrite Slot ${selectedSlotIndex + 1}` 
-                : 'Click Replace on a slot to retake that image.'}
-            </span>
-          </div>
-
-          <div className="grid grid-cols-3 gap-6">
-            {capturedFaces.map((face, index) => {
-              const isActiveSlot = selectedSlotIndex === index
-
-              return (
-                <div 
-                  key={index} 
-                  className={clsx(
-                    "glass rounded-xl border p-3 flex flex-col items-center justify-between transition-all relative group",
-                    isActiveSlot 
-                      ? "border-primary-500 shadow-lg shadow-primary-500/10 scale-102 ring-2 ring-primary-500/20" 
-                      : "border-white/10 hover:border-white/20"
-                  )}
+              <div className="flex justify-end pt-4">
+                <button
+                  type="submit"
+                  className="px-6 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm flex items-center gap-2 shadow-lg shadow-blue-600/20 transition-all hover:scale-[1.02]"
                 >
-                  {/* Image crop slot */}
-                  <div className="w-full aspect-square bg-slate-900 rounded-lg overflow-hidden border border-white/5 flex items-center justify-center relative">
-                    {face ? (
-                      <>
-                        <img src={face.previewUrl} alt={`Slot ${index + 1}`} className="w-full h-full object-cover" />
-                        <button
-                          onClick={() => removeFaceSlot(index)}
-                          className="absolute top-1.5 right-1.5 w-6 h-6 rounded-lg bg-black/60 hover:bg-red-600 text-slate-300 hover:text-white flex items-center justify-center transition-colors border border-white/10"
-                          title="Delete sample"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </>
-                    ) : (
-                      <div className="flex flex-col items-center gap-1.5 text-slate-600 p-4 text-center">
-                        <Camera className="w-6 h-6 opacity-35" />
-                        <span className="text-[10px] font-semibold leading-tight">Slot {index + 1} Empty</span>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Metadata and action buttons */}
-                  <div className="w-full mt-3 space-y-2">
-                    {face ? (
-                      <div className="text-[10px] space-y-1 font-mono">
-                        <div className="flex justify-between">
-                          <span className="text-slate-400">Status:</span>
-                          <span className="font-bold text-green-400">✓ Ready</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-slate-400">Quality Index:</span>
-                          <span className="font-bold text-slate-200">{Math.round(face.blurScore)}</span>
-                        </div>
-                        <div className="text-[9px] text-slate-500 text-right">{face.timestamp}</div>
-                      </div>
-                    ) : (
-                      <div className="text-[10px] text-slate-500 italic text-center font-medium leading-normal py-1">
-                        {isActiveSlot ? "Waiting for new click..." : "Select face overlay to fill"}
-                      </div>
-                    )}
-
-                    <div className="flex gap-2 pt-1.5 border-t border-white/5">
-                      {face && (
-                        <button
-                          onClick={() => setSelectedSlotIndex(isActiveSlot ? null : index)}
-                          className={clsx(
-                            "flex-1 py-1 rounded text-[10px] font-bold text-center border cursor-pointer transition-colors",
-                            isActiveSlot 
-                              ? "bg-slate-800 border-primary-500 text-primary-400" 
-                              : "bg-slate-900 border-white/10 text-slate-300 hover:bg-slate-800"
-                          )}
-                        >
-                          {isActiveSlot ? 'Cancel' : 'Replace / Retake'}
-                        </button>
-                      )}
-                      
-                      {!face && !isActiveSlot && (
-                        <button
-                          onClick={() => setSelectedSlotIndex(index)}
-                          className="w-full py-1 rounded text-[10px] font-bold text-center bg-slate-900 border border-dashed border-white/15 text-slate-400 hover:text-slate-200 hover:border-slate-400 cursor-pointer transition-colors"
-                        >
-                          Select Slot
-                        </button>
-                      )}
-                      
-                      {!face && isActiveSlot && (
-                        <button
-                          onClick={() => setSelectedSlotIndex(null)}
-                          className="w-full py-1 rounded text-[10px] font-bold text-center bg-slate-800 border border-primary-500 text-primary-400 cursor-pointer"
-                        >
-                          Selected
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-
-      </div>
-
-      {/* Floating Register Footer */}
-      <div className="fixed bottom-0 left-0 right-0 p-4 bg-slate-900/85 backdrop-blur-md border-t border-white/5 flex items-center justify-between z-40 max-w-7xl mx-auto w-full rounded-t-2xl px-6 shadow-2xl">
-        <button
-          onClick={() => navigate('/persons')}
-          className="btn-secondary py-2 px-5 text-xs"
-        >
-          Cancel & Exit
-        </button>
-
-        {apiError && (
-          <div className="px-4 py-2 rounded-xl bg-red-500/15 border border-red-500/25 text-xs text-red-300 flex items-center gap-2 max-w-lg truncate shadow-inner">
-            <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
-            <span>{apiError}</span>
+                  Proceed to Capture Method <ArrowRight className="w-4 h-4" />
+                </button>
+              </div>
+            </form>
           </div>
         )}
 
-        <button
-          onClick={handleRegister}
-          disabled={!canSubmit || loading}
-          className={clsx(
-            'btn-primary py-2.5 px-6 text-xs font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed',
-            canSubmit && 'bg-green-600 hover:bg-green-500 text-white shadow-lg shadow-green-500/20'
-          )}
-        >
-          {loading ? 'Processing...' : 'Register Person'}
-        </button>
-      </div>
-
-      {/* Full-Screen Loading Overlay */}
-      {loading && (
-        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center animate-fade-in">
-          <div className="text-center space-y-4 p-8 glass rounded-2xl border border-white/10 shadow-2xl max-w-sm">
-            <RefreshCcw className="w-10 h-10 text-primary-400 animate-spin mx-auto" />
-            <h3 className="font-bold text-white text-base">Registering Profile</h3>
-            <p className="text-xs text-slate-400">{loadingStep}</p>
-          </div>
-        </div>
-      )}
-
-      {/* Success Notification Dialog */}
-      {successOpen && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center animate-fade-in p-4">
-          <div className="glass-bright rounded-2xl p-6 w-full max-w-xs border border-green-500/25 shadow-2xl text-center space-y-4">
-            <div className="w-12 h-12 rounded-full bg-green-500/15 text-green-400 flex items-center justify-center mx-auto">
-              <CheckCircle className="w-6 h-6" />
+        {/* STEP 2: CAPTURE METHOD SELECTION */}
+        {currentStep === 2 && (
+          <div className="max-w-5xl mx-auto w-full space-y-6">
+            <div className="text-center space-y-2 mb-8">
+              <h2 className="text-2xl font-extrabold text-white tracking-tight">Select Face Acquisition Source</h2>
+              <p className="text-sm text-slate-400">Choose between USB webcam, live CCTV camera stream, or photo file upload.</p>
             </div>
-            <div>
-              <h3 className="font-bold text-white text-base">Registered Successfully</h3>
-              <p className="text-xs text-slate-400 mt-1">
-                <strong className="text-white">{firstName} {lastName}</strong> is now registered. 3 embeddings generated and saved. Index updated.
-              </p>
-            </div>
-            <button
-              onClick={() => {
-                setSuccessOpen(false)
-                navigate('/persons')
-              }}
-              className="btn-primary w-full justify-center py-2 text-xs"
-            >
-              OK, View Persons
-            </button>
-          </div>
-        </div>
-      )}
 
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              {/* Card 1: WEBCAM */}
+              <div
+                onClick={() => {
+                  setCaptureMethod('WEBCAM')
+                  setCurrentStep(3)
+                }}
+                className={clsx(
+                  'group cursor-pointer bg-slate-900/80 border border-slate-800 rounded-3xl p-6 transition-all duration-300 hover:border-blue-500/60 hover:bg-slate-900 hover:shadow-2xl hover:shadow-blue-500/10 flex flex-col justify-between space-y-6 relative overflow-hidden',
+                  captureMethod === 'WEBCAM' && 'ring-2 ring-blue-500 bg-slate-900'
+                )}
+              >
+                <div className="w-14 h-14 rounded-2xl bg-blue-600/10 border border-blue-500/20 flex items-center justify-center text-blue-400 group-hover:scale-110 transition-transform">
+                  <Camera className="w-7 h-7" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white mb-2 flex items-center justify-between">
+                    📷 USB Webcam
+                    <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-blue-400 group-hover:translate-x-1 transition-all" />
+                  </h3>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Live multi-angle capture using laptop camera or USB webcam with auto-pose guidance.
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 text-[10px] text-blue-400 font-semibold uppercase tracking-wider">
+                  <Sparkles className="w-3.5 h-3.5" /> Automated Quality Engine
+                </div>
+              </div>
+
+              {/* Card 2: CCTV */}
+              <div
+                onClick={() => {
+                  setCaptureMethod('CCTV')
+                  setCurrentStep(3)
+                }}
+                className={clsx(
+                  'group cursor-pointer bg-slate-900/80 border border-slate-800 rounded-3xl p-6 transition-all duration-300 hover:border-emerald-500/60 hover:bg-slate-900 hover:shadow-2xl hover:shadow-emerald-500/10 flex flex-col justify-between space-y-6 relative overflow-hidden',
+                  captureMethod === 'CCTV' && 'ring-2 ring-emerald-500 bg-slate-900'
+                )}
+              >
+                <div className="w-14 h-14 rounded-2xl bg-emerald-600/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 group-hover:scale-110 transition-transform">
+                  <Video className="w-7 h-7" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white mb-2 flex items-center justify-between">
+                    🎥 CCTV Stream
+                    <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 group-hover:translate-x-1 transition-all" />
+                  </h3>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Acquire face samples directly from a live surveillance IP camera stream.
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 text-[10px] text-emerald-400 font-semibold uppercase tracking-wider">
+                  <Sparkles className="w-3.5 h-3.5" /> Track Locking
+                </div>
+              </div>
+
+              {/* Card 3: PHOTO UPLOAD */}
+              <div
+                onClick={() => {
+                  setCaptureMethod('UPLOAD')
+                  setCurrentStep(3)
+                }}
+                className={clsx(
+                  'group cursor-pointer bg-slate-900/80 border border-slate-800 rounded-3xl p-6 transition-all duration-300 hover:border-purple-500/60 hover:bg-slate-900 hover:shadow-2xl hover:shadow-purple-500/10 flex flex-col justify-between space-y-6 relative overflow-hidden',
+                  captureMethod === 'UPLOAD' && 'ring-2 ring-purple-500 bg-slate-900'
+                )}
+              >
+                <div className="w-14 h-14 rounded-2xl bg-purple-600/10 border border-purple-500/20 flex items-center justify-center text-purple-400 group-hover:scale-110 transition-transform">
+                  <Upload className="w-7 h-7" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white mb-2 flex items-center justify-between">
+                    📁 Photo File Upload
+                    <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-purple-400 group-hover:translate-x-1 transition-all" />
+                  </h3>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Upload 1 or more face photo files directly from your disk or phone.
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 text-[10px] text-purple-400 font-semibold uppercase tracking-wider">
+                  <Sparkles className="w-3.5 h-3.5" /> Works Without Hardware Webcam
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-start pt-4">
+              <button
+                onClick={() => setCurrentStep(1)}
+                className="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-2"
+              >
+                <ArrowLeft className="w-4 h-4" /> Back to Person Info
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* STEP 3: FACE CAPTURE WITH AI ASSISTANT */}
+        {currentStep === 3 && (
+          <div className="w-full space-y-4">
+            {/* Sticky capture toolbar — always reachable without shrinking the window */}
+            <div className="sticky top-0 z-30 bg-slate-950/90 backdrop-blur-md border border-slate-800 rounded-2xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 shadow-lg">
+              <div className="flex items-center gap-3 min-w-0">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse flex-shrink-0" />
+                <div className="min-w-0">
+                  <h3 className="text-sm font-bold text-white uppercase tracking-wider truncate">
+                    Face Capture · {captureMethod}
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    {gallery.length} / {targetSamples} quality samples
+                    {captureMethod === 'CCTV' && !targetLocked ? ' · Click a face to begin' : ''}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  onClick={() => setCurrentStep(2)}
+                  className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 flex items-center gap-1.5"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" /> Method
+                </button>
+                <button
+                  onClick={() => setCurrentStep(4)}
+                  disabled={gallery.length === 0}
+                  className={clsx(
+                    'px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 transition-all',
+                    gallery.length > 0
+                      ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/20'
+                      : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                  )}
+                >
+                  Review Capture ({gallery.length}) <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Collected samples strip — visible near top for quick review */}
+            {gallery.length > 0 && (
+              <div className="bg-slate-900/80 border border-slate-800 rounded-2xl px-4 py-3">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold text-slate-300">Captured Samples</span>
+                  <button
+                    onClick={() => setCurrentStep(4)}
+                    className="text-[11px] font-semibold text-emerald-400 hover:text-emerald-300"
+                  >
+                    Open full review →
+                  </button>
+                </div>
+                <div className="flex gap-2 overflow-x-auto pb-1">
+                  {gallery.map((sample) => (
+                    <div key={sample.id} className="relative w-14 h-14 flex-shrink-0 rounded-xl overflow-hidden border border-slate-700 bg-slate-950 group">
+                      <img src={sample.preview_url} alt="sample" className="w-full h-full object-cover" />
+                      <div className="absolute bottom-0 inset-x-0 bg-slate-950/85 px-0.5 py-0.5 text-[7px] font-bold text-slate-200 uppercase truncate text-center">
+                        {sample.pose_bin.replace(/_/g, ' ')}
+                      </div>
+                      <button
+                        onClick={() => handleRemoveSample(sample.id)}
+                        className="absolute inset-0 bg-rose-600/80 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity"
+                        title="Remove sample"
+                      >
+                        <Trash2 className="w-3.5 h-3.5 text-white" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 w-full">
+            {/* Stream Preview Column */}
+            <div className="xl:col-span-2 bg-slate-900/80 border border-slate-800 rounded-3xl p-4 shadow-2xl backdrop-blur-xl flex flex-col relative">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                    Live Preview
+                  </h3>
+                </div>
+
+                {/* Webcam Device Selector */}
+                {captureMethod === 'WEBCAM' && videoDevices.length > 1 && (
+                  <select
+                    value={selectedDeviceId}
+                    onChange={(e) => {
+                      setSelectedDeviceId(e.target.value)
+                      startWebcam(e.target.value)
+                    }}
+                    className="bg-slate-950 border border-slate-800 text-xs text-slate-200 rounded-xl px-3 py-1.5 focus:outline-none"
+                  >
+                    {videoDevices.map((dev, idx) => (
+                      <option key={dev.deviceId} value={dev.deviceId}>
+                        {dev.label || `Camera ${idx + 1}`}
+                      </option>
+                    ))}
+                  </select>
+                )}
+
+                {/* CCTV Camera Selector */}
+                {captureMethod === 'CCTV' && cameraList.length > 0 && (
+                  <select
+                    value={selectedCameraId}
+                    onChange={(e) => {
+                      setSelectedCameraId(e.target.value)
+                      setCctvError(false)
+                      setCctvStreamKey(Date.now())
+                    }}
+                    className="bg-slate-950 border border-slate-800 text-xs text-slate-200 rounded-xl px-3 py-1.5 focus:outline-none"
+                  >
+                    {cameraList.map(c => {
+                      const cid = c.id || c.camera_id
+                      const isOnline = c.enabled && c.status !== 'OFFLINE'
+                      return (
+                        <option key={cid} value={cid}>
+                          {c.name} ({cid}) {isOnline ? '🟢 Online' : '🔴 Offline'}
+                        </option>
+                      )
+                    })}
+                  </select>
+                )}
+              </div>
+
+              {/* Stream Video Container — capped height so assistant stays reachable */}
+              <div
+                className={clsx(
+                  'relative w-full max-h-[min(48vh,420px)] aspect-video bg-black rounded-2xl overflow-hidden border transition-all duration-300 flex items-center justify-center',
+                  aiAssistant.face_detected && aiAssistant.centered
+                    ? 'border-emerald-500/80 ring-2 ring-emerald-500/60 shadow-[0_0_30px_rgba(16,185,129,0.2)]'
+                    : aiAssistant.face_detected
+                    ? 'border-amber-500/80 ring-2 ring-amber-500/50 shadow-[0_0_25px_rgba(245,158,11,0.15)]'
+                    : 'border-slate-800 shadow-xl'
+                )}
+              >
+                {captureMethod === 'WEBCAM' && (
+                  <>
+                    <video
+                      ref={videoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className="w-full h-full object-cover transform -scale-x-100"
+                    />
+                    {webcamError && (
+                      <div className="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center space-y-4">
+                        <div className="w-14 h-14 rounded-2xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-500">
+                          <AlertCircle className="w-8 h-8" />
+                        </div>
+                        <div>
+                          <h4 className="text-base font-bold text-white mb-1">Webcam Access Blocked</h4>
+                          <p className="text-xs text-slate-300 max-w-md mx-auto leading-relaxed">{webcamError}</p>
+                        </div>
+
+                        <div className="flex items-center gap-3 pt-2">
+                          <button
+                            onClick={() => startWebcam()}
+                            className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs flex items-center gap-1.5 shadow-lg shadow-blue-600/20"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" /> Retry Access
+                          </button>
+
+                          <button
+                            onClick={() => {
+                              setCaptureMethod('UPLOAD')
+                              setWebcamError(null)
+                            }}
+                            className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-semibold text-xs flex items-center gap-1.5"
+                          >
+                            <Upload className="w-3.5 h-3.5" /> Switch to Photo Upload
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {captureMethod === 'CCTV' && (
+                  isSelectedCamOnline && !cctvError ? (
+                    <div className="relative w-full h-full flex items-center justify-center">
+                      <img
+                        ref={cctvImgRef}
+                        key={`${selectedCameraId}_${cctvStreamKey}`}
+                        src={`/video_feed/${selectedCameraId}`}
+                        alt="CCTV Stream"
+                        onLoad={() => setImgLoaded(prev => !prev)}
+                        onError={() => {
+                          setCctvError(true)
+                        }}
+                        className="w-full h-full object-contain bg-black"
+                      />
+                      {/* Single face-box layer (deduped) — stream itself has no baked boxes */}
+                      {!targetLocked && cctvFaces.map((f: any, idx: number) => {
+                        const style = getOverlayBboxStyle(f.bbox)
+                        if (!style.left) return null
+                        const faceId = f.detection_id || `face_${idx}`
+                        const isHovered = hoveredFaceId === faceId
+                        return (
+                          <div
+                            key={faceId}
+                            style={style}
+                            onClick={() => handleSelectFace(f)}
+                            onMouseEnter={() => setHoveredFaceId(faceId)}
+                            onMouseLeave={() => setHoveredFaceId(null)}
+                            title="Click to register this face"
+                            className={clsx(
+                              'absolute cursor-pointer rounded-md z-10 box-border',
+                              isHovered
+                                ? 'border-[2px] border-sky-300 bg-sky-400/10 shadow-[0_0_12px_rgba(125,211,252,0.35)]'
+                                : 'border-2 border-sky-400/80 bg-transparent hover:border-sky-300'
+                            )}
+                          />
+                        )
+                      })}
+
+                      {/* After lock: highlight ONLY the target face */}
+                      {targetLocked && targetDetails?.bbox && (
+                        <div
+                          style={getOverlayBboxStyle(targetDetails.bbox)}
+                          className={clsx(
+                            'absolute border-[3px] rounded-md z-20 pointer-events-none',
+                            targetState === 'TARGET_LOST' || targetState === 'TARGET_TEMPORARILY_LOST'
+                              ? 'border-rose-500 bg-rose-500/10'
+                              : 'border-emerald-400 bg-emerald-400/10 shadow-[0_0_18px_rgba(52,211,153,0.45)]'
+                          )}
+                        >
+                          <div className={clsx(
+                            'absolute -top-6 left-0 px-2 py-0.5 text-[10px] font-bold text-white rounded-sm',
+                            targetState === 'TARGET_LOST' || targetState === 'TARGET_TEMPORARILY_LOST'
+                              ? 'bg-rose-500'
+                              : 'bg-emerald-500'
+                          )}>
+                            {targetState === 'TARGET_LOST' || targetState === 'TARGET_TEMPORARILY_LOST'
+                              ? 'TARGET LOST'
+                              : 'TARGET'}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Instruction strip */}
+                      {isSelectedCamOnline && !cctvError && (
+                        <div className="absolute bottom-3 left-3 right-3 bg-slate-950/80 backdrop-blur-md border border-slate-800 rounded-xl px-3 py-2 flex items-center justify-between gap-3 shadow-xl z-10">
+                          <span className="text-xs text-slate-300">
+                            {!targetLocked
+                              ? (cctvFaces.length === 0
+                                  ? 'Searching for faces…'
+                                  : 'Click a face to begin registration')
+                              : (targetState === 'TARGET_LOST' || targetState === 'TARGET_TEMPORARILY_LOST'
+                                  ? 'Waiting for selected face…'
+                                  : `Capturing quality samples (${gallery.length}/${targetSamples})`)}
+                          </span>
+                          {targetLocked && (
+                            <button
+                              onClick={handleUnlockTarget}
+                              className="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-[11px] font-semibold flex items-center gap-1 flex-shrink-0"
+                            >
+                              <X className="w-3 h-3" /> Change face
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center p-8 text-center space-y-4 bg-slate-950/90 w-full h-full">
+                      <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+                        <Video className="w-8 h-8" />
+                      </div>
+                      <div>
+                        <h4 className="text-base font-bold text-white mb-1">
+                          {selectedCam ? selectedCam.name : 'Camera'} Stream Offline
+                        </h4>
+                        <p className="text-xs text-slate-400 max-w-md mx-auto">
+                          {selectedCam ? `Camera ID: ${selectedCam.id || selectedCam.camera_id} (${selectedCam.location || 'Default Location'})` : 'No active camera selected'}
+                        </p>
+                        <p className="text-[11px] text-slate-500 mt-1">
+                          Check camera power & RTSP configuration in Cameras tab or select another active camera.
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setCctvError(false)
+                          setCctvStreamKey(Date.now())
+                        }}
+                        className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 border border-slate-700"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" /> Retry Stream Connection
+                      </button>
+                    </div>
+                  )
+                )}
+
+                {/* Track selector removed — face-first click-to-select only */}
+
+                {captureMethod === 'UPLOAD' && (
+                  <div
+                    onClick={() => fileInputRef.current?.click()}
+                    className="w-full h-full flex flex-col items-center justify-center p-8 border-2 border-dashed border-purple-500/40 rounded-2xl bg-slate-950/80 hover:bg-slate-900/90 transition-all cursor-pointer space-y-4"
+                  >
+                    <div className="w-16 h-16 rounded-2xl bg-purple-600/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
+                      <Upload className="w-8 h-8" />
+                    </div>
+                    <div className="text-center">
+                      <h4 className="text-sm font-bold text-white">Click to Select or Drop Face Photos</h4>
+                      <p className="text-xs text-slate-400 mt-1">Supports JPG, PNG, WEBP (Multiple files allowed)</p>
+                    </div>
+                    {uploadingFiles && (
+                      <div className="flex items-center gap-2 text-xs text-purple-400 font-semibold">
+                        <RefreshCw className="w-4 h-4 animate-spin" /> Evaluating photos...
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Clean Status Pill Badge (Top Right) */}
+                {captureMethod !== 'UPLOAD' && !webcamError && (
+                  <div className="absolute top-3 right-3 pointer-events-none">
+                    <div
+                      className={clsx(
+                        'px-3 py-1.5 rounded-full text-xs font-semibold backdrop-blur-md border shadow-lg flex items-center gap-2 transition-all',
+                        aiAssistant.face_detected && aiAssistant.centered
+                          ? 'bg-emerald-950/80 border-emerald-500/40 text-emerald-300'
+                          : aiAssistant.face_detected
+                          ? 'bg-amber-950/80 border-amber-500/40 text-amber-300'
+                          : 'bg-slate-950/80 border-slate-800 text-slate-400'
+                      )}
+                    >
+                      <span
+                        className={clsx(
+                          'w-2 h-2 rounded-full',
+                          aiAssistant.face_detected && aiAssistant.centered
+                            ? 'bg-emerald-400 animate-ping'
+                            : aiAssistant.face_detected
+                            ? 'bg-amber-400'
+                            : 'bg-slate-500'
+                        )}
+                      />
+                      {aiAssistant.face_detected
+                        ? (aiAssistant.centered ? 'AI Auto-Capturing' : 'Adjust Alignment')
+                        : (captureMethod === 'CCTV' && !targetLocked
+                            ? 'Click a face to register'
+                            : 'Searching for Face')}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Bottom actions (secondary — primary Review is in sticky top bar) */}
+              <div className="flex items-center justify-between pt-3 mt-1">
+                <p className="text-[11px] text-slate-500">
+                  Scroll if needed · Review Capture stays pinned at the top
+                </p>
+                <button
+                  onClick={() => setCurrentStep(4)}
+                  disabled={gallery.length === 0}
+                  className={clsx(
+                    'px-5 py-2 rounded-xl font-bold text-xs flex items-center gap-2 transition-all',
+                    gallery.length > 0
+                      ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                      : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                  )}
+                >
+                  Review Gallery ({gallery.length}) <ArrowRight className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* AI Assistant Column */}
+            <div className="flex flex-col space-y-4 xl:sticky xl:top-20 xl:self-start">
+              <AiAssistantPanel
+                faceDetected={aiAssistant.face_detected}
+                centered={aiAssistant.centered}
+                sharp={aiAssistant.sharp}
+                lighting={aiAssistant.lighting}
+                eyesVisible={aiAssistant.eyes_visible}
+                faceSizeOk={(aiAssistant as any).face_size_ok}
+                identityVerified={(aiAssistant as any).identity_verified}
+                currentPose={aiAssistant.current_pose}
+                nextNeededPose={(aiAssistant as any).next_needed_pose}
+                guidanceText={aiAssistant.guidance}
+                statusMessage={aiAssistant.status}
+                samplesCollected={gallery.length}
+                targetSamples={targetSamples}
+                progressPercent={Math.min(100, Math.round((gallery.length / Math.max(1, targetSamples)) * 100))}
+                qualityScore={aiAssistant.quality_score}
+                state={captureMethod === 'CCTV' ? targetState : undefined}
+                poseCoverage={poseCoverage}
+                target={captureMethod === 'CCTV' ? targetDetails : undefined}
+                onChangeTarget={captureMethod === 'CCTV' ? handleChangeTarget : undefined}
+              />
+            </div>
+            </div>
+          </div>
+        )}
+
+        {/* STEP 4: GALLERY REVIEW */}
+        {currentStep === 4 && (
+          <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-6 md:p-8 shadow-2xl backdrop-blur-xl max-w-5xl mx-auto w-full space-y-6">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-5">
+              <div>
+                <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                  <ImageIcon className="w-5 h-5 text-indigo-400" /> Step 4: Review Face Gallery ({gallery.length} Samples)
+                </h2>
+                <p className="text-xs text-slate-400 mt-1">
+                  Inspect captured pose diversity and quality scores before final FAISS embedding commit.
+                </p>
+              </div>
+
+              <button
+                onClick={() => setCurrentStep(3)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5"
+              >
+                <RefreshCw className="w-4 h-4 text-blue-400" /> Capture More Poses
+              </button>
+            </div>
+
+            {/* Gallery Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+              {gallery.map((sample, idx) => (
+                <div
+                  key={sample.id}
+                  className="bg-slate-950 border border-slate-800 rounded-2xl p-2.5 flex flex-col justify-between space-y-2 group hover:border-blue-500/50 transition-all"
+                >
+                  <div className="relative aspect-square rounded-xl overflow-hidden bg-slate-900 border border-slate-800">
+                    <img src={sample.preview_url} alt={sample.pose_bin} className="w-full h-full object-cover" />
+                    <button
+                      onClick={() => handleRemoveSample(sample.id)}
+                      className="absolute top-1.5 right-1.5 p-1.5 rounded-lg bg-rose-600/90 text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  <div>
+                    <div className="text-[11px] font-bold text-slate-200 tracking-wide uppercase truncate">
+                      {sample.pose_bin.replace('_', ' ')}
+                    </div>
+                    <div className="flex items-center justify-between text-[10px] text-slate-400 mt-1">
+                      <span>Score: {(sample.quality_score * 100).toFixed(0)}%</span>
+                      <span>{sample.timestamp}</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Navigation Footer */}
+            <div className="flex items-center justify-between pt-6 border-t border-slate-800">
+              <button
+                onClick={() => setCurrentStep(3)}
+                className="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 flex items-center gap-2"
+              >
+                <ArrowLeft className="w-4 h-4" /> Back to Capture
+              </button>
+
+              <button
+                onClick={handleCommitRegistration}
+                className="px-8 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm flex items-center gap-2 shadow-xl shadow-emerald-600/20 transition-all hover:scale-105"
+              >
+                Save & Commit Registration <CheckCircle2 className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* STEP 5: PROCESSING & COMMIT */}
+        {currentStep === 5 && (
+          <div className="max-w-xl mx-auto w-full bg-slate-900/90 border border-slate-800 rounded-3xl p-8 shadow-2xl backdrop-blur-xl text-center space-y-6">
+            {!registrationCompleted && !commitError && (
+              <>
+                <div className="w-20 h-20 rounded-3xl bg-blue-600/10 border border-blue-500/30 flex items-center justify-center text-blue-400 mx-auto animate-bounce">
+                  <Cpu className="w-10 h-10 animate-spin" />
+                </div>
+
+                <div>
+                  <h3 className="text-xl font-bold text-white mb-2">Finalizing Registration...</h3>
+                  <p className="text-xs text-slate-400 font-mono">{processingStage}</p>
+                </div>
+
+                <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden p-0.5 border border-slate-700">
+                  <div className="h-full bg-blue-500 rounded-full animate-pulse w-full" />
+                </div>
+              </>
+            )}
+
+            {commitError && (
+              <div className="space-y-4">
+                <div className="w-16 h-16 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-500 mx-auto">
+                  <AlertCircle className="w-8 h-8" />
+                </div>
+                <h3 className="text-lg font-bold text-rose-400">Registration Failed</h3>
+                <p className="text-xs text-slate-300 bg-rose-500/10 border border-rose-500/20 p-3 rounded-xl">{commitError}</p>
+                <button
+                  onClick={() => setCurrentStep(4)}
+                  className="px-6 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white"
+                >
+                  Return to Review
+                </button>
+              </div>
+            )}
+
+            {registrationCompleted && (
+              <div className="space-y-6">
+                <div className="w-20 h-20 rounded-3xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 mx-auto">
+                  <CheckCircle2 className="w-10 h-10" />
+                </div>
+
+                <div>
+                  <h3 className="text-2xl font-extrabold text-white mb-1">Registration Complete!</h3>
+                  <p className="text-xs text-slate-400">
+                    Profile and multi-angle face embeddings successfully added to database & FAISS index.
+                  </p>
+                </div>
+
+                <div className="flex items-center justify-center gap-4 pt-2">
+                  <button
+                    onClick={() => {
+                      setCurrentStep(1)
+                      setFirstName('')
+                      setLastName('')
+                      setEmployeeId('')
+                      setGallery([])
+                      setRegistrationCompleted(false)
+                    }}
+                    className="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold"
+                  >
+                    Register Another Person
+                  </button>
+
+                  <button
+                    onClick={() => navigate('/persons')}
+                    className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-lg shadow-blue-600/20"
+                  >
+                    View Persons Gallery
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </main>
     </div>
   )
 }

@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 from app.config import settings
 
 # ArcFace standard 112x112 5-landmark target template
@@ -18,10 +18,16 @@ def l2_normalize(vec: np.ndarray, axis: int = -1, eps: float = 1e-10) -> np.ndar
     norm = np.maximum(norm, eps)
     return vec / norm
 
-def calculate_blur(image: np.ndarray) -> float:
+def calculate_blur(image: np.ndarray, bbox: Optional[List[float]] = None) -> float:
     """Calculate image sharpness score using Laplacian variance."""
     if image is None or image.size == 0:
         return 0.0
+    if bbox and len(bbox) == 4:
+        h, w = image.shape[:2]
+        x1, y1, x2, y2 = bbox
+        crop = image[max(0, int(y1)):min(h, int(y2)), max(0, int(x1)):min(w, int(x2))]
+        if crop.size > 0:
+            image = crop
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 

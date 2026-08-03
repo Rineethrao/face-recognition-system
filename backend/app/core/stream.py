@@ -354,20 +354,28 @@ class CameraStreamManager:
             self._reconnect_in_progress = False
 
     def _open_capture(self, source) -> Optional[cv2.VideoCapture]:
-        """Open a cv2.VideoCapture with RTSP TCP keepalive settings."""
+        """Open a cv2.VideoCapture with RTSP TCP keepalive settings or DirectShow on Windows."""
         try:
             if isinstance(source, str) and source.startswith("rtsp"):
                 cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
-                # Single-frame internal buffer: always return the newest frame
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                # Soft open timeout hint (ignored by some backends, harmless)
                 try:
                     cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
                     cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
                 except Exception:
                     pass
             else:
-                cap = cv2.VideoCapture(source)
+                # Local USB Webcam source (0, "0", etc.)
+                # On Windows, try DirectShow (CAP_DSHOW) first to avoid MSMF exclusive lock conflicts
+                if os.name == "nt":
+                    try:
+                        src_idx = int(source) if str(source).isdigit() else 0
+                        cap = cv2.VideoCapture(src_idx, cv2.CAP_DSHOW)
+                    except Exception:
+                        cap = cv2.VideoCapture(source)
+                else:
+                    cap = cv2.VideoCapture(source)
+
                 try:
                     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 except Exception:

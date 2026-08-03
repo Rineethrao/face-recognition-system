@@ -11,6 +11,7 @@ import { Events } from './pages/Events'
 import { Analytics } from './pages/Analytics'
 import { Settings } from './pages/Settings'
 import { useStore } from './store/useStore'
+import { ToastContainer } from './components/ui/Toast'
 
 export default function App() {
   const { theme } = useStore()
@@ -26,7 +27,7 @@ export default function App() {
 
   return (
     <BrowserRouter>
-      <div className="flex h-screen w-screen overflow-hidden bg-navy-950 transition-colors duration-300">
+      <div className="flex h-screen w-screen overflow-hidden bg-slate-50 dark:bg-slate-950 transition-colors duration-200">
         <Sidebar />
         <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
           <Routes>
@@ -42,6 +43,7 @@ export default function App() {
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
         </main>
+        <ToastContainer />
       </div>
     </BrowserRouter>
   )
