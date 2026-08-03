@@ -44,3 +44,4 @@ __pycache__/
 .env
 .env.local
 *.log
+/backend/app/models/
