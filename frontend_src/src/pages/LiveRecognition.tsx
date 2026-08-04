@@ -18,19 +18,55 @@ import clsx from 'clsx'
 
 type GridLayout = 'auto' | '1x1' | '2x2' | '3x3'
 
-function formatLocalTime(utcString: string) {
-  if (!utcString) return ''
-  const isoString = utcString.replace(' ', 'T') + 'Z'
+function parseRecognizedAt(utcString: string): Date | null {
+  if (!utcString) return null
+  const isoString = utcString.includes('T') || utcString.endsWith('Z')
+    ? utcString
+    : utcString.replace(' ', 'T') + 'Z'
   const date = new Date(isoString)
-  if (isNaN(date.getTime())) {
-    const normalDate = new Date(utcString)
-    if (isNaN(normalDate.getTime())) return utcString
-    return normalDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
-  }
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+  if (!isNaN(date.getTime())) return date
+  const fallback = new Date(utcString)
+  return isNaN(fallback.getTime()) ? null : fallback
 }
 
-function RecognitionCard({ event }: { event: RecognitionEvent }) {
+/** One latest recognition event per person_id, newest first. */
+function latestEventsByPerson(events: RecognitionEvent[]): RecognitionEvent[] {
+  const byPerson = new Map<string, RecognitionEvent>()
+
+  for (const event of events) {
+    const key = event.person_id || 'unknown'
+    const existing = byPerson.get(key)
+    if (!existing) {
+      byPerson.set(key, event)
+      continue
+    }
+    const nextTs = parseRecognizedAt(event.recognized_at)?.getTime() ?? 0
+    const prevTs = parseRecognizedAt(existing.recognized_at)?.getTime() ?? 0
+    if (nextTs >= prevTs) byPerson.set(key, event)
+  }
+
+  return Array.from(byPerson.values()).sort((a, b) => {
+    const aTs = parseRecognizedAt(a.recognized_at)?.getTime() ?? 0
+    const bTs = parseRecognizedAt(b.recognized_at)?.getTime() ?? 0
+    return bTs - aTs
+  })
+}
+
+/** Compact relative time: "2s ago", "5m ago", "3h ago". */
+function formatRelativeAgo(utcString: string, nowMs: number): string {
+  const date = parseRecognizedAt(utcString)
+  if (!date) return ''
+  const diffSec = Math.max(0, Math.floor((nowMs - date.getTime()) / 1000))
+  if (diffSec < 60) return `${diffSec}s ago`
+  const diffMin = Math.floor(diffSec / 60)
+  if (diffMin < 60) return `${diffMin}m ago`
+  const diffHr = Math.floor(diffMin / 60)
+  if (diffHr < 24) return `${diffHr}h ago`
+  const diffDay = Math.floor(diffHr / 24)
+  return `${diffDay}d ago`
+}
+
+function RecognitionCard({ event, nowMs }: { event: RecognitionEvent; nowMs: number }) {
   const isUnknown = event.person_id === 'unknown'
   const [imgSrc, setImgSrc] = useState<string>(() =>
     isUnknown ? '' : `/faces/${event.person_id}/sample_1_frontal.jpg`
@@ -96,11 +132,6 @@ function RecognitionCard({ event }: { event: RecognitionEvent }) {
           <span className={clsx('text-xs font-bold truncate', isUnknown ? 'text-amber-600 dark:text-amber-300' : 'text-slate-900 dark:text-white')}>
             {isUnknown ? 'Unknown Person' : event.name}
           </span>
-          {!isUnknown && (
-            <Badge variant={pct >= 75 ? 'success' : 'warning'} size="sm">
-              {pct}%
-            </Badge>
-          )}
         </div>
 
         <div className="text-[10px] text-slate-500 dark:text-slate-400 flex items-center justify-between">
@@ -110,7 +141,7 @@ function RecognitionCard({ event }: { event: RecognitionEvent }) {
           </span>
           <span className="flex items-center gap-1 font-mono text-[9px] text-slate-500 flex-shrink-0">
             <Clock className="w-3 h-3 text-slate-400 dark:text-slate-500 flex-shrink-0" />
-            {formatLocalTime(event.recognized_at)}
+            {formatRelativeAgo(event.recognized_at, nowMs)}
           </span>
         </div>
       </div>
@@ -226,6 +257,7 @@ export function LiveRecognition() {
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<'online' | 'all' | 'offline'>('online')
   const [showBrowserCam, setShowBrowserCam] = useState(false)
+  const [nowMs, setNowMs] = useState(() => Date.now())
 
   useEffect(() => {
     getCameras().then(setCameras).catch(() => {})
@@ -244,6 +276,13 @@ export function LiveRecognition() {
       clearInterval(faceInterval)
     }
   }, [])
+
+  useEffect(() => {
+    const tick = setInterval(() => setNowMs(Date.now()), 1000)
+    return () => clearInterval(tick)
+  }, [])
+
+  const uniqueEvents = latestEventsByPerson(events)
 
   const filteredCams = cameras.filter(c => {
     const matchSearch =
@@ -288,7 +327,7 @@ export function LiveRecognition() {
           </div>
 
           {/* Filter Pills */}
-          <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800">
+          <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-900 p-1 rounded-xl border border-slate-200 dark:border-slate-700">
             {(['online', 'all', 'offline'] as const).map(f => (
               <button
                 key={f}
@@ -297,7 +336,7 @@ export function LiveRecognition() {
                   'px-3 py-1 rounded-lg text-xs font-semibold capitalize transition-all cursor-pointer',
                   statusFilter === f
                     ? 'bg-blue-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-white'
+                    : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100'
                 )}
               >
                 {f === 'online' ? `Online (${cameras.filter(c => c.enabled && c.status !== 'OFFLINE').length})` : f}
@@ -308,14 +347,14 @@ export function LiveRecognition() {
 
         {/* Layout & Webcam Options */}
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800">
+          <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-900 p-1 rounded-xl border border-slate-200 dark:border-slate-700">
             <button
               onClick={() => setLayout('auto')}
               className={clsx(
                 'px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer',
                 layout === 'auto'
                   ? 'bg-blue-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-white'
+                  : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100'
               )}
               title="Auto-Fit Grid"
             >
@@ -333,7 +372,9 @@ export function LiveRecognition() {
                 onClick={() => setLayout(l as any)}
                 className={clsx(
                   'w-7 h-7 rounded-lg flex items-center justify-center transition-all cursor-pointer',
-                  layout === l ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'
+                  layout === l
+                    ? 'bg-blue-600 text-white'
+                    : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100'
                 )}
                 title={`${l} Grid Layout`}
               >
@@ -348,7 +389,7 @@ export function LiveRecognition() {
               'px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all border cursor-pointer',
               showBrowserCam
                 ? 'bg-emerald-600 text-white border-emerald-500 shadow-md'
-                : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-slate-700'
+                : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700 dark:hover:border-slate-600'
             )}
           >
             <CameraIcon className="w-3.5 h-3.5" />
@@ -394,14 +435,14 @@ export function LiveRecognition() {
             <h3 className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
               <Radio className="w-4 h-4 text-emerald-505 dark:text-emerald-400 animate-pulse" /> Live Detection Stream
             </h3>
-            <Badge variant="info" size="sm">{events.length} Events</Badge>
+            <Badge variant="info" size="sm">{uniqueEvents.length} People</Badge>
           </div>
 
           <div className="flex-1 overflow-y-auto p-3 space-y-2.5">
-            {events.map(evt => (
-              <RecognitionCard key={`${evt.id}-${evt.track_id}`} event={evt} />
+            {uniqueEvents.map(evt => (
+              <RecognitionCard key={evt.person_id} event={evt} nowMs={nowMs} />
             ))}
-            {events.length === 0 && (
+            {uniqueEvents.length === 0 && (
               <EmptyState
                 icon={<Eye className="w-7 h-7" />}
                 title="Awaiting Detections"
@@ -413,9 +454,9 @@ export function LiveRecognition() {
       </div>
 
       {/* Operator Footer Status */}
-      <div className="px-6 py-2 border-t border-slate-800/80 bg-slate-950 flex items-center justify-between text-[11px] text-slate-400 flex-shrink-0">
+      <div className="px-6 py-2 border-t border-slate-200 dark:border-slate-700/80 bg-slate-50 dark:bg-slate-900 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400 flex-shrink-0">
         <div className="flex items-center gap-4">
-          <span className="flex items-center gap-1.5 text-emerald-400 font-semibold">
+          <span className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-semibold">
             <span className="online-dot w-1.5 h-1.5" /> Live Facial Ingestion Active
           </span>
           <span>•</span>

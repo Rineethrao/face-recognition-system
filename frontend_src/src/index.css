@@ -3,51 +3,51 @@
 @tailwind utilities;
 
 :root {
-  /* --- Clean Neutral Light Theme --- */
-  --bg-gradient: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
-  --bg-base: #f8fafc;
-  --bg-card: rgba(255, 255, 255, 0.95);
+  /* --- Soft Neutral Light Theme --- */
+  --bg-gradient: linear-gradient(135deg, #f1f5f9 0%, #eef2f7 100%);
+  --bg-base: #f1f5f9;
+  --bg-card: rgba(255, 255, 255, 0.92);
   --bg-card-solid: #ffffff;
   --bg-sidebar: #ffffff;
   --bg-input: #ffffff;
   --border-color: #e2e8f0;
   --border-color-hover: #cbd5e1;
-  --text-primary: #0f172a;    /* Slate 900 */
-  --text-secondary: #334155;  /* Slate 700 */
+  --text-primary: #1e293b;    /* Slate 800 — softer than near-black */
+  --text-secondary: #475569;  /* Slate 600 */
   --text-muted: #64748b;      /* Slate 500 */
-  --text-white: #0f172a;
+  --text-white: #1e293b;
   
   --primary-color: #2563eb;
   --primary-glow: rgba(37, 99, 235, 0.08);
   
   /* Scrollbar */
-  --scrollbar-track: #f1f5f9;
+  --scrollbar-track: #e2e8f0;
   --scrollbar-thumb: #cbd5e1;
   --scrollbar-thumb-hover: #94a3b8;
 }
 
 .dark {
-  /* --- Control-Room Dark Theme --- */
-  --bg-gradient: linear-gradient(135deg, #0b0f19 0%, #0f172a 100%);
-  --bg-base: #0b0f19;
-  --bg-card: rgba(15, 23, 42, 0.85);
-  --bg-card-solid: #0f172a;
-  --bg-sidebar: #0f172a;
-  --bg-input: #1e293b;
-  --border-color: rgba(255, 255, 255, 0.08);
-  --border-color-hover: rgba(59, 130, 246, 0.3);
-  --text-primary: #f8fafc;    /* Slate 50 */
-  --text-secondary: #cbd5e1;  /* Slate 300 */
+  /* --- Softened Control-Room Dark Theme --- */
+  --bg-gradient: linear-gradient(135deg, #111827 0%, #0f172a 100%);
+  --bg-base: #111827;
+  --bg-card: rgba(30, 41, 59, 0.88);
+  --bg-card-solid: #1e293b;
+  --bg-sidebar: #1e293b;
+  --bg-input: #334155;
+  --border-color: rgba(148, 163, 184, 0.16);
+  --border-color-hover: rgba(59, 130, 246, 0.35);
+  --text-primary: #e2e8f0;    /* Slate 200 — not pure white */
+  --text-secondary: #94a3b8;  /* Slate 400 */
   --text-muted: #64748b;      /* Slate 500 */
-  --text-white: #ffffff;
+  --text-white: #e2e8f0;
   
   --primary-color: #3b82f6;
   --primary-glow: rgba(59, 130, 246, 0.15);
 
   /* Scrollbar */
-  --scrollbar-track: #0f172a;
-  --scrollbar-thumb: #334155;
-  --scrollbar-thumb-hover: #475569;
+  --scrollbar-track: #1e293b;
+  --scrollbar-thumb: #475569;
+  --scrollbar-thumb-hover: #64748b;
 }
 
 @layer base {
@@ -341,7 +341,7 @@
 }
 
 .skeleton {
-  background: linear-gradient(90deg, #1e293b 25%, #334155 37%, #1e293b 63%);
+  background: linear-gradient(90deg, #334155 25%, #475569 37%, #334155 63%);
   background-size: 400px 100%;
   animation: shimmer 1.4s ease infinite;
 }
@@ -354,13 +354,13 @@ html:not(.dark) .skeleton {
 /* Light mode compatibility adjustments */
 html:not(.dark) {
   .text-white {
-    color: #0f172a !important;
+    color: #1e293b !important;
   }
   .text-slate-100, .text-slate-200 {
     color: #1e293b !important;
   }
   .text-slate-300 {
-    color: #334155 !important;
+    color: #475569 !important;
   }
   .text-slate-400 {
     color: #64748b !important;
@@ -371,12 +371,24 @@ html:not(.dark) {
   .bg-slate-800, .bg-navy-800 {
     background-color: #ffffff !important;
   }
+  /* Opacity variants that otherwise stay pitch-dark on light pages */
+  .bg-slate-950\/40,
+  .bg-slate-950\/60,
+  .bg-slate-900\/40,
+  .bg-slate-900\/60,
+  .bg-slate-900\/80 {
+    background-color: rgba(241, 245, 249, 0.92) !important;
+  }
+  .bg-slate-800\/60,
+  .bg-slate-800\/80 {
+    background-color: rgba(255, 255, 255, 0.92) !important;
+  }
   .border-slate-800, .border-slate-700, .border-white\/5, .border-white\/10 {
     border-color: #e2e8f0 !important;
   }
   select, input, textarea {
     background-color: #ffffff !important;
-    color: #0f172a !important;
+    color: #1e293b !important;
     border-color: #cbd5e1 !important;
   }
 }

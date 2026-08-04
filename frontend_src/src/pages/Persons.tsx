@@ -18,6 +18,31 @@ const ROLE_OPTIONS = [
   'Missing Person',
 ]
 
+/** Backend stores UTC without Z; show local system time. */
+function formatRegisteredAt(utcString: string): string {
+  if (!utcString) return ''
+  const iso = utcString.includes('T') || utcString.endsWith('Z')
+    ? utcString
+    : utcString.replace(' ', 'T') + 'Z'
+  const date = new Date(iso)
+  if (isNaN(date.getTime())) {
+    const fallback = new Date(utcString)
+    if (isNaN(fallback.getTime())) return utcString
+    return formatLocalDateTime(fallback)
+  }
+  return formatLocalDateTime(date)
+}
+
+function formatLocalDateTime(date: Date): string {
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, '0')
+  const d = String(date.getDate()).padStart(2, '0')
+  const hh = String(date.getHours()).padStart(2, '0')
+  const mm = String(date.getMinutes()).padStart(2, '0')
+  const ss = String(date.getSeconds()).padStart(2, '0')
+  return `${y}-${m}-${d} ${hh}:${mm}:${ss}`
+}
+
 export function Persons() {
   const [persons, setPersons] = useState<Person[]>([])
   const [search, setSearch] = useState('')
@@ -196,7 +221,7 @@ export function Persons() {
                       <span>Sample Embeddings</span>
                       <span className="badge-blue text-[10px]">{p.embedding_count}</span>
                     </div>
-                    <div className="text-[10px] text-slate-500">Registered: {p.registered_at}</div>
+                    <div className="text-[10px] text-slate-500">Registered: {formatRegisteredAt(p.registered_at)}</div>
                   </div>
 
                   {p.face_images && p.face_images.length > 0 && (

@@ -28,15 +28,15 @@ export function Button({
 
   const variantClasses = {
     primary:
-      'bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white shadow-md shadow-blue-600/20 border border-blue-500/30',
+      'bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white shadow-md shadow-blue-600/15 border border-blue-500/25',
     secondary:
-      'bg-slate-800/80 hover:bg-slate-700 active:bg-slate-900 text-slate-200 border border-slate-700 dark:bg-slate-800/80 dark:hover:bg-slate-700 dark:text-slate-200 dark:border-slate-700',
+      'bg-white hover:bg-slate-50 active:bg-slate-100 text-slate-700 border border-slate-200 dark:bg-slate-800/80 dark:hover:bg-slate-700 dark:active:bg-slate-900 dark:text-slate-200 dark:border-slate-600',
     ghost:
-      'bg-transparent hover:bg-slate-800/40 text-slate-400 hover:text-slate-200 dark:hover:bg-slate-800/60',
+      'bg-transparent hover:bg-slate-100 text-slate-500 hover:text-slate-800 dark:hover:bg-slate-800/60 dark:text-slate-400 dark:hover:text-slate-200',
     danger:
-      'bg-rose-500/10 hover:bg-rose-500/20 active:bg-rose-500/30 text-rose-400 border border-rose-500/30',
+      'bg-rose-500/10 hover:bg-rose-500/20 active:bg-rose-500/30 text-rose-600 dark:text-rose-400 border border-rose-500/30',
     success:
-      'bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white shadow-md shadow-emerald-600/20 border border-emerald-500/30',
+      'bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white shadow-md shadow-emerald-600/15 border border-emerald-500/25',
   }
 
   return (

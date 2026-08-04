@@ -60,7 +60,7 @@ export function Sidebar() {
   return (
     <aside
       className={clsx(
-        'flex flex-col h-screen glass border-r border-slate-200 dark:border-slate-800 transition-all duration-200 ease-in-out flex-shrink-0 z-30 select-none',
+        'flex flex-col h-screen glass border-r border-slate-200 dark:border-slate-700/80 transition-all duration-200 ease-in-out flex-shrink-0 z-30 select-none',
         sidebarCollapsed ? 'w-20' : 'w-64'
       )}
     >
@@ -72,10 +72,9 @@ export function Sidebar() {
           </div>
           {!sidebarCollapsed && (
             <div className="min-w-0">
-              <div className="text-sm font-bold text-slate-900 dark:text-white tracking-tight flex items-center gap-1">
-                <span className="text-blue-500">👁️</span> VisionTrack AI
+              <div className="text-sm font-bold text-slate-800 dark:text-slate-100 tracking-tight flex items-center gap-1">
+                <span className="text-blue-600 dark:text-blue-400">DFT</span> Face Recognition
               </div>
-              <div className="text-[9px] font-medium text-slate-500 dark:text-slate-400 truncate">Intelligent Video Security</div>
             </div>
           )}
         </div>
@@ -122,28 +121,28 @@ export function Sidebar() {
 
       {/* System Status Footbar */}
       {!sidebarCollapsed && (
-        <div className="px-3 py-3 border-t border-slate-800/80 bg-slate-950/40">
-          <div className="flex items-center justify-between text-xs px-2 py-1.5 rounded-xl bg-slate-900/80 border border-slate-800">
+        <div className="px-3 py-3 border-t border-slate-200 dark:border-slate-800/80 bg-slate-50/90 dark:bg-slate-950/40">
+          <div className="flex items-center justify-between text-xs px-2.5 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-sm">
             <div className="flex items-center gap-2">
-              <span className={clsx('w-2 h-2 rounded-full', isHealthy ? 'bg-emerald-400' : 'bg-rose-400 animate-ping')} />
-              <span className="text-[11px] font-semibold text-slate-300">
+              <span className={clsx('w-2 h-2 rounded-full flex-shrink-0', isHealthy ? 'bg-emerald-500' : 'bg-rose-500 animate-ping')} />
+              <span className="text-[11px] font-semibold text-slate-800 dark:text-slate-100">
                 {isHealthy ? 'System Active' : 'System Degraded'}
               </span>
             </div>
-            <span className="text-[10px] font-mono text-slate-500">v2.0</span>
+            <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400">v2.0</span>
           </div>
         </div>
       )}
 
       {/* Collapse Toggle */}
-      <div className="px-3 py-2 border-t border-slate-800/80 flex items-center justify-end">
+      <div className="px-3 py-2 border-t border-slate-200 dark:border-slate-800/80 flex items-center justify-end">
         <button
           onClick={toggleSidebar}
-          className="p-1.5 rounded-xl hover:bg-slate-800/80 text-slate-400 hover:text-white transition-colors cursor-pointer w-full flex items-center justify-center gap-2"
+          className="p-1.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800/80 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer w-full flex items-center justify-center gap-2"
           title={sidebarCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
         >
           <ChevronLeft className={clsx('w-4 h-4 transition-transform duration-200', sidebarCollapsed && 'rotate-180')} />
-          {!sidebarCollapsed && <span className="text-[11px] font-semibold text-slate-400">Collapse</span>}
+          {!sidebarCollapsed && <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Collapse</span>}
         </button>
       </div>
     </aside>

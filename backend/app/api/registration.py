@@ -285,6 +285,23 @@ def remove_gallery_sample(sample_id: str):
     return APIResponse(status=res["status"], message=res["message"], data=res)
 
 
+@router.post("/register/session/check_duplicate", response_model=APIResponse)
+def check_session_duplicate():
+    """
+    Step 4: Non-destructive soft/hard duplicate assessment against FAISS.
+    Does not write to DB or FAISS. Commit path remains unchanged.
+    """
+    data = registration_engine.assess_duplicate_status()
+    level = data.get("level", "none")
+    if level == "hard":
+        message = "Hard duplicate match detected"
+    elif level == "soft":
+        message = "Possible duplicate match detected"
+    else:
+        message = "No duplicate match detected"
+    return APIResponse(status="success", message=message, data=data)
+
+
 @router.post("/register/session/commit", response_model=APIResponse)
 def commit_wizard_registration():
     """Step 5: Final enrollment into DB + FAISS using production embedding pipeline."""

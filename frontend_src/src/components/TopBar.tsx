@@ -20,8 +20,8 @@ export function TopBar({ title }: { title: string }) {
   return (
     <header className="flex items-center justify-between px-6 py-3.5 border-b border-slate-200 dark:border-slate-800/80 glass flex-shrink-0 min-h-[64px] z-20">
       <div>
-        <h1 className="text-base font-bold text-slate-900 dark:text-white tracking-tight">{title}</h1>
-        <p className="text-[11px] text-slate-500 font-medium hidden md:block">Real-time CCTV Monitoring & Analytics Platform</p>
+        <h1 className="text-base font-bold text-slate-800 dark:text-slate-100 tracking-tight">{title}</h1>
+        <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium hidden md:block">Real-time CCTV Monitoring & Analytics Platform</p>
       </div>
 
       <div className="flex items-center gap-3">

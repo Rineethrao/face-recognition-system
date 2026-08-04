@@ -38,19 +38,55 @@ function buildHourlyData(events: RecognitionEvent[]) {
   }))
 }
 
-function formatLocalTime(utcString: string) {
-  if (!utcString) return ''
-  const isoString = utcString.replace(' ', 'T') + 'Z'
+function parseRecognizedAt(utcString: string): Date | null {
+  if (!utcString) return null
+  const isoString = utcString.includes('T') || utcString.endsWith('Z')
+    ? utcString
+    : utcString.replace(' ', 'T') + 'Z'
   const date = new Date(isoString)
-  if (isNaN(date.getTime())) {
-    const normalDate = new Date(utcString)
-    if (isNaN(normalDate.getTime())) return utcString
-    return normalDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
-  }
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+  if (!isNaN(date.getTime())) return date
+  const fallback = new Date(utcString)
+  return isNaN(fallback.getTime()) ? null : fallback
 }
 
-function DashboardEventItem({ event }: { event: RecognitionEvent }) {
+/** One latest recognition event per person_id, newest first. */
+function latestEventsByPerson(events: RecognitionEvent[]): RecognitionEvent[] {
+  const byPerson = new Map<string, RecognitionEvent>()
+
+  for (const event of events) {
+    const key = event.person_id || 'unknown'
+    const existing = byPerson.get(key)
+    if (!existing) {
+      byPerson.set(key, event)
+      continue
+    }
+    const nextTs = parseRecognizedAt(event.recognized_at)?.getTime() ?? 0
+    const prevTs = parseRecognizedAt(existing.recognized_at)?.getTime() ?? 0
+    if (nextTs >= prevTs) byPerson.set(key, event)
+  }
+
+  return Array.from(byPerson.values()).sort((a, b) => {
+    const aTs = parseRecognizedAt(a.recognized_at)?.getTime() ?? 0
+    const bTs = parseRecognizedAt(b.recognized_at)?.getTime() ?? 0
+    return bTs - aTs
+  })
+}
+
+/** Compact relative time: "2s ago", "5m ago", "3h ago". */
+function formatRelativeAgo(utcString: string, nowMs: number): string {
+  const date = parseRecognizedAt(utcString)
+  if (!date) return ''
+  const diffSec = Math.max(0, Math.floor((nowMs - date.getTime()) / 1000))
+  if (diffSec < 60) return `${diffSec}s ago`
+  const diffMin = Math.floor(diffSec / 60)
+  if (diffMin < 60) return `${diffMin}m ago`
+  const diffHr = Math.floor(diffMin / 60)
+  if (diffHr < 24) return `${diffHr}h ago`
+  const diffDay = Math.floor(diffHr / 24)
+  return `${diffDay}d ago`
+}
+
+function DashboardEventItem({ event, nowMs }: { event: RecognitionEvent; nowMs: number }) {
   const isUnknown = event.person_id === 'unknown'
   const [imgSrc, setImgSrc] = useState<string>(() =>
     isUnknown ? '' : `/faces/${event.person_id}/sample_1_frontal.jpg`
@@ -68,8 +104,6 @@ function DashboardEventItem({ event }: { event: RecognitionEvent }) {
       setImgError(true)
     }
   }
-
-  const pct = Math.round((event.similarity || 0) * 100)
 
   return (
     <div
@@ -105,17 +139,12 @@ function DashboardEventItem({ event }: { event: RecognitionEvent }) {
           <span className={clsx('text-xs font-bold truncate', isUnknown ? 'text-amber-600 dark:text-amber-300' : 'text-slate-900 dark:text-white')}>
             {isUnknown ? 'Unknown Person' : event.name}
           </span>
-          {!isUnknown && (
-            <Badge variant={pct >= 75 ? 'success' : 'warning'} size="sm">
-              {pct}% Match
-            </Badge>
-          )}
         </div>
 
         <div className="text-[10px] text-slate-500 dark:text-slate-400 flex items-center justify-between">
           <span className="truncate">{event.camera_id || 'CCTV Stream'}</span>
           <span className="font-mono text-[9px] text-slate-500 flex-shrink-0">
-            {formatLocalTime(event.recognized_at)}
+            {formatRelativeAgo(event.recognized_at, nowMs)}
           </span>
         </div>
       </div>
@@ -126,6 +155,7 @@ function DashboardEventItem({ event }: { event: RecognitionEvent }) {
 export function Dashboard() {
   const { health, cameras, recentEvents, setHealth, setCameras, setRecentEvents } = useStore()
   const [loading, setLoading] = useState(true)
+  const [nowMs, setNowMs] = useState(() => Date.now())
 
   const loadData = async () => {
     try {
@@ -144,6 +174,11 @@ export function Dashboard() {
     loadData()
     const interval = setInterval(loadData, 10000)
     return () => clearInterval(interval)
+  }, [])
+
+  useEffect(() => {
+    const tick = setInterval(() => setNowMs(Date.now()), 1000)
+    return () => clearInterval(tick)
   }, [])
 
   // Sort cameras: Enabled/Online first
@@ -217,8 +252,8 @@ export function Dashboard() {
                       <Camera className="w-4.5 h-4.5" />
                     </div>
                   </div>
-                  <div className="text-2xl font-bold text-white mb-1">
-                    {onlineCams} <span className="text-sm font-normal text-slate-400">/ {totalCams}</span>
+                  <div className="text-2xl font-bold text-slate-900 dark:text-slate-100 mb-1">
+                    {onlineCams} <span className="text-sm font-normal text-slate-500 dark:text-slate-400">/ {totalCams}</span>
                   </div>
                   <div className="flex items-center gap-1.5 text-xs text-emerald-400 font-medium">
                     <CheckCircle2 className="w-3.5 h-3.5" /> {onlineCams} Cameras Online & Ingesting
@@ -235,7 +270,7 @@ export function Dashboard() {
                       <Users className="w-4.5 h-4.5" />
                     </div>
                   </div>
-                  <div className="text-2xl font-bold text-white mb-1">{totalPersons}</div>
+                  <div className="text-2xl font-bold text-slate-900 dark:text-slate-100 mb-1">{totalPersons}</div>
                   <div className="text-xs text-slate-400 font-medium">
                     Enrolled Identity Profiles
                   </div>
@@ -251,7 +286,7 @@ export function Dashboard() {
                       <Activity className="w-4.5 h-4.5" />
                     </div>
                   </div>
-                  <div className="text-2xl font-bold text-white mb-1">{todayDetections}</div>
+                  <div className="text-2xl font-bold text-slate-900 dark:text-slate-100 mb-1">{todayDetections}</div>
                   <div className="flex items-center gap-1 text-xs text-blue-400 font-medium">
                     <TrendingUp className="w-3.5 h-3.5" /> Active Face Recognition Logs
                   </div>
@@ -267,7 +302,7 @@ export function Dashboard() {
                       <AlertTriangle className="w-4.5 h-4.5" />
                     </div>
                   </div>
-                  <div className="text-2xl font-bold text-white mb-1">{unknownAlerts}</div>
+                  <div className="text-2xl font-bold text-slate-900 dark:text-slate-100 mb-1">{unknownAlerts}</div>
                   <div className="text-xs text-amber-400 font-medium">
                     Unregistered / Unknown Faces Logged
                   </div>
@@ -424,8 +459,8 @@ export function Dashboard() {
                     description="Live face recognition matches will appear here automatically."
                   />
                 ) : (
-                  recentEvents.slice(0, 15).map((event, idx) => (
-                    <DashboardEventItem key={event.id || idx} event={event} />
+                  latestEventsByPerson(recentEvents).slice(0, 15).map((event) => (
+                    <DashboardEventItem key={event.person_id} event={event} nowMs={nowMs} />
                   ))
                 )}
               </CardBody>

@@ -70,6 +70,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "target_similarity_threshold": 0.55,
         "target_reacquire_threshold": 0.60,
         "duplicate_similarity_threshold": 0.88,
+        "duplicate_warning_threshold": 0.52,
         "target_lost_timeout": 3.0,
         "capture_interval": 1.0,
         "processing_fps": 8,
@@ -185,6 +186,7 @@ class Settings:
         self.REGISTRATION_TARGET_SIMILARITY_THRESHOLD: float = float(_reg.get("target_similarity_threshold", 0.55))
         self.REGISTRATION_TARGET_REACQUIRE_THRESHOLD: float = float(_reg.get("target_reacquire_threshold", 0.60))
         self.REGISTRATION_DUPLICATE_SIMILARITY_THRESHOLD: float = float(_reg.get("duplicate_similarity_threshold", 0.88))
+        self.REGISTRATION_DUPLICATE_WARNING_THRESHOLD: float = float(_reg.get("duplicate_warning_threshold", 0.52))
         self.REGISTRATION_TARGET_LOST_TIMEOUT: float = float(_reg.get("target_lost_timeout", 3.0))
         self.REGISTRATION_CAPTURE_INTERVAL: float = float(_reg.get("capture_interval", 1.0))
         self.REGISTRATION_PROCESSING_FPS: int = int(_reg.get("processing_fps", 8))

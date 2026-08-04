@@ -27,7 +27,7 @@ export default function App() {
 
   return (
     <BrowserRouter>
-      <div className="flex h-screen w-screen overflow-hidden bg-slate-50 dark:bg-slate-950 transition-colors duration-200">
+      <div className="flex h-screen w-screen overflow-hidden bg-slate-100 dark:bg-slate-900 transition-colors duration-200">
         <Sidebar />
         <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
           <Routes>

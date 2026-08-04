@@ -744,6 +744,35 @@ class RegistrationEngine:
             "pose_coverage": dict(self.pose_coverage),
         }
 
+    def assess_duplicate_status(self) -> Dict[str, Any]:
+        """
+        Non-destructive duplicate assessment for gallery review warning UI.
+        Does not write to DB or FAISS.
+        """
+        if not self.is_registering or not self.person_id:
+            return {
+                "level": "none",
+                "matched_person_id": None,
+                "matched_name": None,
+                "similarity": 0.0,
+                "error": "No active registration session",
+            }
+
+        if len(gallery_service.samples) == 0:
+            return {
+                "level": "none",
+                "matched_person_id": None,
+                "matched_name": None,
+                "similarity": 0.0,
+                "error": "Gallery is empty",
+            }
+
+        all_embeddings = [s["embedding"] for s in gallery_service.samples]
+        return duplicate_service.assess_duplicate(
+            all_embeddings,
+            current_person_id=self.person_id,
+        )
+
     def commit_registration(self) -> Tuple[bool, str, Dict[str, Any]]:
         if not self.is_registering or not self.person_id:
             return False, "No active registration session to commit.", {}

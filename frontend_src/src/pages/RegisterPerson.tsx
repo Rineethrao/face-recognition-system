@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import {
-  User, Camera, Video, Sparkles, CheckCircle2, AlertCircle, Trash2, X,
+  User, Camera, Video, Sparkles, CheckCircle2, AlertCircle, AlertTriangle, Trash2, X,
   ArrowRight, ArrowLeft, ShieldCheck, Check, Cpu, Play, Eye, Upload, RefreshCw,
   Image as ImageIcon
 } from 'lucide-react'
@@ -249,6 +249,16 @@ export function RegisterPerson() {
   const [gallery, setGallery] = useState<GallerySample[]>([])
   const [uploadingFiles, setUploadingFiles] = useState<boolean>(false)
 
+  // Duplicate assessment (Step 4 warning — does not change commit hard-block)
+  const [duplicateCheck, setDuplicateCheck] = useState<{
+    level: 'none' | 'soft' | 'hard'
+    matched_person_id?: string | null
+    matched_name?: string | null
+    similarity?: number
+  } | null>(null)
+  const [softContinueAck, setSoftContinueAck] = useState(false)
+  const [duplicateChecking, setDuplicateChecking] = useState(false)
+
   // Step 5: Commit Processing State
   const [isProcessing, setIsProcessing] = useState<boolean>(false)
   const [processingStage, setProcessingStage] = useState<string>('Initializing...')
@@ -269,6 +279,71 @@ export function RegisterPerson() {
     }
     prevGalleryCount.current = gallery.length
   }, [gallery.length, targetSamples])
+
+  const runDuplicateCheck = async () => {
+    setDuplicateChecking(true)
+    setSoftContinueAck(false)
+    try {
+      const res = await api.post('/register/session/check_duplicate')
+      const data = res.data?.data
+      if (data) {
+        setDuplicateCheck({
+          level: data.level || 'none',
+          matched_person_id: data.matched_person_id,
+          matched_name: data.matched_name,
+          similarity: data.similarity,
+        })
+      } else {
+        setDuplicateCheck({ level: 'none' })
+      }
+    } catch {
+      setDuplicateCheck({ level: 'none' })
+    } finally {
+      setDuplicateChecking(false)
+    }
+  }
+
+  // Assess duplicates whenever gallery review (Step 4) is shown or gallery changes
+  useEffect(() => {
+    if (currentStep !== 4) return
+    runDuplicateCheck()
+  }, [currentStep, gallery.length])
+
+  const handleUpdateExistingFromWarning = async () => {
+    const matchedId = duplicateCheck?.matched_person_id
+    if (!matchedId) return
+
+    try {
+      await api.delete('/register/session')
+    } catch {}
+
+    const match = registeredPersons.find((p: any) => p.person_id === matchedId)
+    setSelectedExistingId(matchedId)
+    setPersonId(matchedId)
+    if (match) {
+      const parts = (match.name || '').split(' ')
+      setFirstName(match.first_name || parts[0] || '')
+      setLastName(match.last_name || parts.slice(1).join(' ') || '')
+      setEmployeeId(match.person_id)
+      setDepartment(match.department || '')
+      setRole(match.role || 'Employee')
+    } else {
+      setFirstName(duplicateCheck?.matched_name?.split(' ')[0] || '')
+      setLastName(duplicateCheck?.matched_name?.split(' ').slice(1).join(' ') || '')
+      setEmployeeId(matchedId)
+    }
+
+    setGallery([])
+    setDuplicateCheck(null)
+    setSoftContinueAck(false)
+    setIsCapturing(false)
+    setTargetLocked(false)
+    setCurrentStep(1)
+    toast.info(
+      'Update existing person',
+      `Continue registration for ${duplicateCheck?.matched_name || matchedId} instead of creating a new profile.`
+    )
+  }
 
   // Load existing persons & CCTV cameras on mount
   useEffect(() => {
@@ -553,6 +628,11 @@ export function RegisterPerson() {
       }
     } catch (err) {}
   }
+
+  const canCommit =
+    !duplicateChecking &&
+    duplicateCheck?.level !== 'hard' &&
+    (duplicateCheck?.level !== 'soft' || softContinueAck)
 
   return (
     <div className="flex flex-col h-full overflow-hidden bg-transparent text-slate-900 dark:text-slate-100 registration-form-page">
@@ -1297,6 +1377,86 @@ export function RegisterPerson() {
               ))}
             </div>
 
+            {/* Duplicate identity warning (soft / hard) */}
+            {duplicateChecking && (
+              <div className="rounded-2xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-xs text-slate-400 flex items-center gap-2">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                Checking gallery against existing identities...
+              </div>
+            )}
+
+            {!duplicateChecking && duplicateCheck?.level === 'soft' && (
+              <div className="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4 space-y-3">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400 flex-shrink-0">
+                    <AlertTriangle className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <h4 className="text-sm font-bold text-amber-300">Possible duplicate person</h4>
+                    <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+                      This face looks similar to an existing person (e.g. glasses or lighting differences).
+                      Prefer updating that profile instead of creating a new one.
+                    </p>
+                    <p className="text-xs text-amber-200/90 mt-2 font-mono">
+                      Match: {duplicateCheck.matched_name || 'Unknown'} ({duplicateCheck.matched_person_id})
+                      {' · '}
+                      {Math.round((duplicateCheck.similarity || 0) * 100)}% similarity
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={handleUpdateExistingFromWarning}
+                    className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold"
+                  >
+                    Update existing
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSoftContinueAck(true)}
+                    className={clsx(
+                      'px-4 py-2 rounded-xl text-xs font-semibold border transition-colors',
+                      softContinueAck
+                        ? 'bg-slate-700 border-slate-600 text-slate-200'
+                        : 'bg-slate-900 border-amber-500/40 text-amber-200 hover:bg-slate-800'
+                    )}
+                  >
+                    {softContinueAck ? 'Continue acknowledged' : 'Continue anyway'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {!duplicateChecking && duplicateCheck?.level === 'hard' && (
+              <div className="rounded-2xl border border-rose-500/40 bg-rose-500/10 p-4 space-y-3">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-400 flex-shrink-0">
+                    <AlertCircle className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <h4 className="text-sm font-bold text-rose-300">Duplicate face blocked</h4>
+                    <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+                      A matching face is already registered. Commit is disabled — update the existing
+                      profile or capture a different person.
+                    </p>
+                    <p className="text-xs text-rose-200/90 mt-2 font-mono">
+                      Match: {duplicateCheck.matched_name || 'Unknown'} ({duplicateCheck.matched_person_id})
+                      {' · '}
+                      {Math.round((duplicateCheck.similarity || 0) * 100)}% similarity
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleUpdateExistingFromWarning}
+                  className="px-4 py-2 rounded-xl bg-rose-500 hover:bg-rose-400 text-white text-xs font-bold"
+                >
+                  Update existing
+                </button>
+              </div>
+            )}
+
             {/* Navigation Footer */}
             <div className="flex items-center justify-between pt-6 border-t border-slate-800">
               <button
@@ -1308,7 +1468,13 @@ export function RegisterPerson() {
 
               <button
                 onClick={handleCommitRegistration}
-                className="px-8 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm flex items-center gap-2 shadow-xl shadow-emerald-600/20 transition-all hover:scale-105"
+                disabled={!canCommit}
+                className={clsx(
+                  'px-8 py-3 rounded-xl text-white font-bold text-sm flex items-center gap-2 shadow-xl transition-all',
+                  canCommit
+                    ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-600/20 hover:scale-105'
+                    : 'bg-slate-700 cursor-not-allowed opacity-60 shadow-none'
+                )}
               >
                 Save & Commit Registration <CheckCircle2 className="w-5 h-5" />
               </button>
