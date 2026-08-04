@@ -46,7 +46,7 @@ curl -L -o Ai-models/det_10g.onnx \
 curl -L -o Ai-models/w600k_r50.onnx \
   "https://huggingface.co/public-data/insightface/resolve/main/models/buffalo_l/w600k_r50.onnx"
 
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+python -m uvicorn main:app --reload --host 127.0.0.1 --port 8002
 ```
 
 Dev with auto-reload:
