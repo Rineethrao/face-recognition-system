@@ -116,6 +116,7 @@ def get_recognition_summaries(
             func.count(RecognitionLogModel.id).label("total_count"),
             func.avg(RecognitionLogModel.similarity).label("avg_similarity"),
             func.max(RecognitionLogModel.id).label("last_log_id"),
+            func.min(RecognitionLogModel.id).label("first_log_id"),
         )
         .group_by(RecognitionLogModel.person_id)
         .all()
@@ -125,9 +126,11 @@ def get_recognition_summaries(
         return APIResponse(status="success", message="No recognition history.", data=[])
 
     last_ids = [r.last_log_id for r in rows if r.last_log_id is not None]
-    last_logs = {
+    first_ids = [r.first_log_id for r in rows if r.first_log_id is not None]
+    lookup_ids = list({*last_ids, *first_ids})
+    logs_by_id = {
         log.id: log
-        for log in db.query(RecognitionLogModel).filter(RecognitionLogModel.id.in_(last_ids)).all()
+        for log in db.query(RecognitionLogModel).filter(RecognitionLogModel.id.in_(lookup_ids)).all()
     }
 
     # Prefer current registered display name when available
@@ -138,11 +141,14 @@ def get_recognition_summaries(
 
     summaries = []
     for row in rows:
-        last = last_logs.get(row.last_log_id)
+        last = logs_by_id.get(row.last_log_id)
+        first = logs_by_id.get(row.first_log_id)
         pid = row.person_id
         name = person_names.get(pid) or (last.name if last else pid)
         camera_id = (last.camera_id if last and last.camera_id else "default")
         last_seen = last.timestamp.strftime("%Y-%m-%d %H:%M:%S") if last and last.timestamp else ""
+        first_seen = first.timestamp.strftime("%Y-%m-%d %H:%M:%S") if first and first.timestamp else ""
+        first_camera = (first.camera_id if first and first.camera_id else "default")
 
         item = {
             "person_id": pid,
@@ -151,11 +157,13 @@ def get_recognition_summaries(
             "avg_confidence": float(row.avg_similarity or 0.0),
             "last_seen_time": last_seen,
             "last_seen_camera": camera_id,
+            "first_seen_time": first_seen,
+            "first_seen_camera": first_camera,
         }
 
         if search:
             q = search.lower().strip()
-            hay = f"{item['name']} {item['person_id']} {item['last_seen_camera']}".lower()
+            hay = f"{item['name']} {item['person_id']} {item['last_seen_camera']} {item['first_seen_camera']}".lower()
             if q not in hay:
                 continue
 

@@ -11,6 +11,7 @@ import {
   testCameraConnection, getStreamUrl
 } from '../lib/cameraApi'
 import type { CameraConfig, CameraCreatePayload, CameraTestResult } from '../lib/cameraApi'
+import { formatLocalDateTime } from '../lib/datetime'
 import clsx from 'clsx'
 
 const CAMERA_BRANDS = [
@@ -653,7 +654,9 @@ export function Cameras() {
                       {cam.last_recognition ? (
                         <div className="flex justify-between text-[11px]">
                           <span>Last Seen</span>
-                          <span className="text-blue-600 dark:text-primary-400 font-semibold">{cam.last_recognition.name} ({cam.last_recognition.recognized_at})</span>
+                          <span className="text-blue-600 dark:text-primary-400 font-semibold">
+                            {cam.last_recognition.name} ({formatLocalDateTime(cam.last_recognition.recognized_at)})
+                          </span>
                         </div>
                       ) : null}
                     </div>

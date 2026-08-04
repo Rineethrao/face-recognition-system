@@ -8,6 +8,7 @@ import { TopBar } from '../components/TopBar'
 import { getRecognitions, getRecognitionSummaries } from '../lib/api'
 import type { RecognitionEvent, RecognitionPersonSummary } from '../lib/api'
 import { Badge } from '../components/ui/Badge'
+import { formatLocalDateTime, formatLocalTime } from '../lib/datetime'
 import clsx from 'clsx'
 
 function PersonAvatar({ personId, name }: { personId: string; name: string }) {
@@ -45,18 +46,6 @@ function PersonAvatar({ personId, name }: { personId: string; name: string }) {
       className="w-12 h-12 rounded-xl object-cover border border-slate-200 dark:border-white/10 bg-slate-950 shadow-md"
     />
   )
-}
-
-function formatLocalDateTime(utcString: string) {
-  if (!utcString) return ''
-  const isoString = utcString.replace(' ', 'T') + 'Z'
-  const date = new Date(isoString)
-  if (isNaN(date.getTime())) {
-    const normalDate = new Date(utcString)
-    if (isNaN(normalDate.getTime())) return utcString
-    return normalDate.toLocaleString()
-  }
-  return date.toLocaleString()
 }
 
 export function Events() {
@@ -130,7 +119,7 @@ export function Events() {
       ? filteredFlat
       : Object.values(personEvents).flat()
     const rows = (source.length ? source : filteredFlat).map(e => [
-      e.id, e.person_id, `"${e.name}"`, e.similarity, e.track_id, e.camera_id, `"${e.recognized_at}"`
+      e.id, e.person_id, `"${e.name}"`, e.similarity, e.track_id, e.camera_id, `"${formatLocalDateTime(e.recognized_at)}"`
     ])
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(r => r.join(','))].join('\n')
     const encodedUri = encodeURI(csvContent)
@@ -239,10 +228,6 @@ export function Events() {
 
                     <div className="hidden md:flex items-center gap-6 text-slate-500 dark:text-slate-400 text-xs">
                       <div>
-                        <div className="text-[10px] text-slate-505 uppercase font-bold tracking-wider mb-0.5">Detections</div>
-                        <div className="font-semibold text-slate-900 dark:text-white">{group.total_count} times</div>
-                      </div>
-                      <div>
                         <div className="text-[10px] text-slate-505 uppercase font-bold tracking-wider mb-0.5">Last Seen Camera</div>
                         <div className="font-mono text-slate-700 dark:text-slate-300">{group.last_seen_camera}</div>
                       </div>
@@ -255,21 +240,30 @@ export function Events() {
                         </span>
                       </div>
                       <div>
+                        <div className="text-[10px] text-slate-505 uppercase font-bold tracking-wider mb-0.5">First Seen</div>
+                        <div className="text-slate-700 dark:text-slate-300 flex items-center gap-1" title={group.first_seen_camera ? `Camera: ${group.first_seen_camera}` : undefined}>
+                          <Clock className="w-3.5 h-3.5 text-slate-400 dark:text-slate-505" />
+                          {group.first_seen_time ? formatLocalDateTime(group.first_seen_time) : '—'}
+                        </div>
+                      </div>
+                      <div>
                         <div className="text-[10px] text-slate-505 uppercase font-bold tracking-wider mb-0.5">Last Active</div>
                         <div className="text-slate-700 dark:text-slate-300 flex items-center gap-1">
                           <Clock className="w-3.5 h-3.5 text-slate-400 dark:text-slate-505" />
-                          {group.last_seen_time.split(' ')[1] || group.last_seen_time}
+                          {formatLocalTime(group.last_seen_time)}
                         </div>
                       </div>
                     </div>
 
-                    <div className="md:hidden flex items-center gap-2">
-                      <Badge variant="neutral" size="sm">
-                        x{group.total_count}
-                      </Badge>
+                    <div className="md:hidden flex flex-col items-end gap-1.5">
                       <Badge variant={group.avg_confidence >= 0.85 ? 'success' : group.avg_confidence >= 0.7 ? 'warning' : 'danger'} size="sm">
                         {avgPct}%
                       </Badge>
+                      {group.first_seen_time && (
+                        <span className="text-[10px] text-slate-500 font-mono">
+                          First: {formatLocalDateTime(group.first_seen_time)}
+                        </span>
+                      )}
                     </div>
 
                     <div className="text-slate-400 hover:text-white p-1 rounded-lg">
@@ -279,6 +273,28 @@ export function Events() {
 
                   {isExpanded && (
                     <div className="border-t border-slate-200 dark:border-white/5 bg-slate-50/40 dark:bg-navy-950/40 px-4 py-3 animate-fade-in">
+                      {(group.first_seen_time || group.last_seen_time) && (
+                        <div className="mb-3 text-[11px] text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-x-3 gap-y-1">
+                          {group.first_seen_time && (
+                            <span>
+                              First seen:{' '}
+                              <span className="font-mono text-slate-700 dark:text-slate-300">
+                                {formatLocalDateTime(group.first_seen_time)}
+                              </span>
+                              {group.first_seen_camera ? ` · ${group.first_seen_camera}` : ''}
+                            </span>
+                          )}
+                          {group.last_seen_time && (
+                            <span>
+                              Last seen:{' '}
+                              <span className="font-mono text-slate-700 dark:text-slate-300">
+                                {formatLocalDateTime(group.last_seen_time)}
+                              </span>
+                              {group.last_seen_camera ? ` · ${group.last_seen_camera}` : ''}
+                            </span>
+                          )}
+                        </div>
+                      )}
                       {detailLoading ? (
                         <div className="py-6 text-center text-xs text-slate-500">Loading detection history…</div>
                       ) : detailEvents.length === 0 ? (

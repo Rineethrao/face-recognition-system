@@ -62,6 +62,8 @@ export interface RecognitionPersonSummary {
   avg_confidence: number
   last_seen_time: string
   last_seen_camera: string
+  first_seen_time?: string
+  first_seen_camera?: string
 }
 
 export interface DetectedFace {

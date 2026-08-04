@@ -17,6 +17,7 @@ import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { StatCardSkeleton, CameraCardSkeleton, TableRowSkeleton } from '../components/ui/Skeleton'
 import { EmptyState } from '../components/ui/EmptyState'
+import { parseUtcTimestamp, formatRelativeAgo } from '../lib/datetime'
 import clsx from 'clsx'
 
 function buildHourlyData(events: RecognitionEvent[]) {
@@ -24,8 +25,8 @@ function buildHourlyData(events: RecognitionEvent[]) {
   for (let i = 0; i < 12; i++) hours[i] = 0
 
   events.forEach(e => {
-    const dateObj = new Date(e.recognized_at)
-    if (!isNaN(dateObj.getTime())) {
+    const dateObj = parseUtcTimestamp(e.recognized_at)
+    if (dateObj) {
       const h = dateObj.getHours() % 12
       hours[h] = (hours[h] || 0) + 1
     }
@@ -36,17 +37,6 @@ function buildHourlyData(events: RecognitionEvent[]) {
     recognitions: count,
     unknown: Math.floor(count * 0.25),
   }))
-}
-
-function parseRecognizedAt(utcString: string): Date | null {
-  if (!utcString) return null
-  const isoString = utcString.includes('T') || utcString.endsWith('Z')
-    ? utcString
-    : utcString.replace(' ', 'T') + 'Z'
-  const date = new Date(isoString)
-  if (!isNaN(date.getTime())) return date
-  const fallback = new Date(utcString)
-  return isNaN(fallback.getTime()) ? null : fallback
 }
 
 /** One latest recognition event per person_id, newest first. */
@@ -60,30 +50,16 @@ function latestEventsByPerson(events: RecognitionEvent[]): RecognitionEvent[] {
       byPerson.set(key, event)
       continue
     }
-    const nextTs = parseRecognizedAt(event.recognized_at)?.getTime() ?? 0
-    const prevTs = parseRecognizedAt(existing.recognized_at)?.getTime() ?? 0
+    const nextTs = parseUtcTimestamp(event.recognized_at)?.getTime() ?? 0
+    const prevTs = parseUtcTimestamp(existing.recognized_at)?.getTime() ?? 0
     if (nextTs >= prevTs) byPerson.set(key, event)
   }
 
   return Array.from(byPerson.values()).sort((a, b) => {
-    const aTs = parseRecognizedAt(a.recognized_at)?.getTime() ?? 0
-    const bTs = parseRecognizedAt(b.recognized_at)?.getTime() ?? 0
+    const aTs = parseUtcTimestamp(a.recognized_at)?.getTime() ?? 0
+    const bTs = parseUtcTimestamp(b.recognized_at)?.getTime() ?? 0
     return bTs - aTs
   })
-}
-
-/** Compact relative time: "2s ago", "5m ago", "3h ago". */
-function formatRelativeAgo(utcString: string, nowMs: number): string {
-  const date = parseRecognizedAt(utcString)
-  if (!date) return ''
-  const diffSec = Math.max(0, Math.floor((nowMs - date.getTime()) / 1000))
-  if (diffSec < 60) return `${diffSec}s ago`
-  const diffMin = Math.floor(diffSec / 60)
-  if (diffMin < 60) return `${diffMin}m ago`
-  const diffHr = Math.floor(diffMin / 60)
-  if (diffHr < 24) return `${diffHr}h ago`
-  const diffDay = Math.floor(diffHr / 24)
-  return `${diffDay}d ago`
 }
 
 function DashboardEventItem({ event, nowMs }: { event: RecognitionEvent; nowMs: number }) {

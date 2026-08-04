@@ -10,6 +10,7 @@ import { AiAssistantPanel } from '../components/AiAssistantPanel'
 import { useNavigate } from 'react-router-dom'
 import { api, getCameras, type CameraConfig } from '../lib/cameraApi'
 import { toast } from '../components/ui/Toast'
+import { formatLocalTime } from '../lib/datetime'
 import clsx from 'clsx'
 
 const ROLE_OPTIONS = [
@@ -1370,7 +1371,9 @@ export function RegisterPerson() {
                     </div>
                     <div className="flex items-center justify-between text-[10px] text-slate-400 mt-1">
                       <span>Score: {(sample.quality_score * 100).toFixed(0)}%</span>
-                      <span>{sample.timestamp}</span>
+                      <span>{sample.timestamp.includes(' ') || sample.timestamp.includes('T')
+                        ? formatLocalTime(sample.timestamp)
+                        : formatLocalTime(`1970-01-01 ${sample.timestamp}`)}</span>
                     </div>
                   </div>
                 </div>

@@ -14,20 +14,10 @@ import { Card, CardHeader, CardTitle, CardBody } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { EmptyState } from '../components/ui/EmptyState'
+import { parseUtcTimestamp, formatRelativeAgo } from '../lib/datetime'
 import clsx from 'clsx'
 
 type GridLayout = 'auto' | '1x1' | '2x2' | '3x3'
-
-function parseRecognizedAt(utcString: string): Date | null {
-  if (!utcString) return null
-  const isoString = utcString.includes('T') || utcString.endsWith('Z')
-    ? utcString
-    : utcString.replace(' ', 'T') + 'Z'
-  const date = new Date(isoString)
-  if (!isNaN(date.getTime())) return date
-  const fallback = new Date(utcString)
-  return isNaN(fallback.getTime()) ? null : fallback
-}
 
 /** One latest recognition event per person_id, newest first. */
 function latestEventsByPerson(events: RecognitionEvent[]): RecognitionEvent[] {
@@ -40,30 +30,16 @@ function latestEventsByPerson(events: RecognitionEvent[]): RecognitionEvent[] {
       byPerson.set(key, event)
       continue
     }
-    const nextTs = parseRecognizedAt(event.recognized_at)?.getTime() ?? 0
-    const prevTs = parseRecognizedAt(existing.recognized_at)?.getTime() ?? 0
+    const nextTs = parseUtcTimestamp(event.recognized_at)?.getTime() ?? 0
+    const prevTs = parseUtcTimestamp(existing.recognized_at)?.getTime() ?? 0
     if (nextTs >= prevTs) byPerson.set(key, event)
   }
 
   return Array.from(byPerson.values()).sort((a, b) => {
-    const aTs = parseRecognizedAt(a.recognized_at)?.getTime() ?? 0
-    const bTs = parseRecognizedAt(b.recognized_at)?.getTime() ?? 0
+    const aTs = parseUtcTimestamp(a.recognized_at)?.getTime() ?? 0
+    const bTs = parseUtcTimestamp(b.recognized_at)?.getTime() ?? 0
     return bTs - aTs
   })
-}
-
-/** Compact relative time: "2s ago", "5m ago", "3h ago". */
-function formatRelativeAgo(utcString: string, nowMs: number): string {
-  const date = parseRecognizedAt(utcString)
-  if (!date) return ''
-  const diffSec = Math.max(0, Math.floor((nowMs - date.getTime()) / 1000))
-  if (diffSec < 60) return `${diffSec}s ago`
-  const diffMin = Math.floor(diffSec / 60)
-  if (diffMin < 60) return `${diffMin}m ago`
-  const diffHr = Math.floor(diffMin / 60)
-  if (diffHr < 24) return `${diffHr}h ago`
-  const diffDay = Math.floor(diffHr / 24)
-  return `${diffDay}d ago`
 }
 
 function RecognitionCard({ event, nowMs }: { event: RecognitionEvent; nowMs: number }) {

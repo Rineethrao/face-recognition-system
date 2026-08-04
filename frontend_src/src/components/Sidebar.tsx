@@ -65,9 +65,9 @@ export function Sidebar() {
       )}
     >
       {/* Brand Header */}
-      <div className="flex items-center justify-between px-4 py-4 border-b border-slate-200 dark:border-slate-800/80 min-h-[72px]">
+      <div className="flex items-center justify-between px-4 py-4 border-b border-slate-200 dark:border-slate-800/80 min-h-[84px]">
         <div className="flex items-center gap-3 overflow-hidden">
-          <div className="flex-shrink-0 w-11 h-11 rounded-xl bg-white border border-slate-200 dark:border-slate-800/50 flex items-center justify-center p-1 shadow-md">
+          <div className="flex-shrink-0 w-16 h-16 rounded-xl bg-white border border-slate-200 dark:border-slate-800/50 flex items-center justify-center p-1.5 shadow-md">
             <img src={logoImg} alt="VisionTrack Logo" className="w-full h-full object-contain" />
           </div>
           {!sidebarCollapsed && (
