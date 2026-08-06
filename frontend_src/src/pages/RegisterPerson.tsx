@@ -1057,10 +1057,10 @@ export function RegisterPerson() {
                 )}
               </div>
 
-              {/* Stream Video Container — capped height so assistant stays reachable */}
+              {/* Stream Video Container — keep the CCTV frame visually clean and dominant */}
               <div
                 className={clsx(
-                  'relative w-full max-h-[min(48vh,420px)] aspect-video bg-black rounded-2xl overflow-hidden border transition-all duration-300 flex items-center justify-center',
+                  'relative w-full min-h-[320px] md:min-h-[420px] xl:min-h-[560px] bg-black rounded-2xl overflow-hidden border transition-all duration-300',
                   aiAssistant.face_detected && aiAssistant.centered
                     ? 'border-emerald-500/80 ring-2 ring-emerald-500/60 shadow-[0_0_30px_rgba(16,185,129,0.2)]'
                     : aiAssistant.face_detected
@@ -1124,7 +1124,7 @@ export function RegisterPerson() {
                         }}
                         className="w-full h-full object-contain bg-black"
                       />
-                      {/* Single face-box layer (deduped) — stream itself has no baked boxes */}
+                      {/* Single face-box layer (deduped) — keep detected faces visible without obscuring the feed */}
                       {!targetLocked && cctvFaces.map((f: any, idx: number) => {
                         const style = getOverlayBboxStyle(f.bbox)
                         if (!style.left) return null
@@ -1139,59 +1139,36 @@ export function RegisterPerson() {
                             onMouseLeave={() => setHoveredFaceId(null)}
                             title="Click to register this face"
                             className={clsx(
-                              'absolute cursor-pointer rounded-md z-10 box-border',
+                              'absolute cursor-pointer rounded-[4px] z-10 box-border transition-all duration-150',
                               isHovered
-                                ? 'border-[2px] border-sky-300 bg-sky-400/10 shadow-[0_0_12px_rgba(125,211,252,0.35)]'
-                                : 'border-2 border-sky-400/80 bg-transparent hover:border-sky-300'
+                                ? 'border-[2px] border-sky-300/90 bg-sky-400/10 shadow-[0_0_10px_rgba(125,211,252,0.25)]'
+                                : 'border-[1.5px] border-slate-200/80 bg-slate-950/10 hover:border-sky-300/80'
                             )}
                           />
                         )
                       })}
 
-                      {/* After lock: highlight ONLY the target face */}
+                      {/* After lock: highlight ONLY the target face with a compact, non-obtrusive marker */}
                       {targetLocked && targetDetails?.bbox && (
                         <div
                           style={getOverlayBboxStyle(targetDetails.bbox)}
                           className={clsx(
-                            'absolute border-[3px] rounded-md z-20 pointer-events-none',
+                            'absolute border-[2px] rounded-[4px] z-20 pointer-events-none',
                             targetState === 'TARGET_LOST' || targetState === 'TARGET_TEMPORARILY_LOST'
                               ? 'border-rose-500 bg-rose-500/10'
-                              : 'border-emerald-400 bg-emerald-400/10 shadow-[0_0_18px_rgba(52,211,153,0.45)]'
+                              : 'border-emerald-400 bg-emerald-400/10 shadow-[0_0_12px_rgba(52,211,153,0.3)]'
                           )}
                         >
                           <div className={clsx(
-                            'absolute -top-6 left-0 px-2 py-0.5 text-[10px] font-bold text-white rounded-sm',
+                            'absolute -top-5 left-0 px-1.5 py-0.5 text-[9px] font-bold text-white rounded-sm',
                             targetState === 'TARGET_LOST' || targetState === 'TARGET_TEMPORARILY_LOST'
                               ? 'bg-rose-500'
                               : 'bg-emerald-500'
                           )}>
                             {targetState === 'TARGET_LOST' || targetState === 'TARGET_TEMPORARILY_LOST'
-                              ? 'TARGET LOST'
+                              ? 'LOST'
                               : 'TARGET'}
                           </div>
-                        </div>
-                      )}
-
-                      {/* Instruction strip */}
-                      {isSelectedCamOnline && !cctvError && (
-                        <div className="absolute bottom-3 left-3 right-3 bg-slate-950/80 backdrop-blur-md border border-slate-800 rounded-xl px-3 py-2 flex items-center justify-between gap-3 shadow-xl z-10">
-                          <span className="text-xs text-slate-300">
-                            {!targetLocked
-                              ? (cctvFaces.length === 0
-                                  ? 'Searching for faces…'
-                                  : 'Click a face to begin registration')
-                              : (targetState === 'TARGET_LOST' || targetState === 'TARGET_TEMPORARILY_LOST'
-                                  ? 'Waiting for selected face…'
-                                  : `Capturing quality samples (${gallery.length}/${targetSamples})`)}
-                          </span>
-                          {targetLocked && (
-                            <button
-                              onClick={handleUnlockTarget}
-                              className="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-[11px] font-semibold flex items-center gap-1 flex-shrink-0"
-                            >
-                              <X className="w-3 h-3" /> Change face
-                            </button>
-                          )}
                         </div>
                       )}
                     </div>
@@ -1246,37 +1223,6 @@ export function RegisterPerson() {
                   </div>
                 )}
 
-                {/* Clean Status Pill Badge (Top Right) */}
-                {captureMethod !== 'UPLOAD' && !webcamError && (
-                  <div className="absolute top-3 right-3 pointer-events-none">
-                    <div
-                      className={clsx(
-                        'px-3 py-1.5 rounded-full text-xs font-semibold backdrop-blur-md border shadow-lg flex items-center gap-2 transition-all',
-                        aiAssistant.face_detected && aiAssistant.centered
-                          ? 'bg-emerald-950/80 border-emerald-500/40 text-emerald-300'
-                          : aiAssistant.face_detected
-                          ? 'bg-amber-950/80 border-amber-500/40 text-amber-300'
-                          : 'bg-slate-950/80 border-slate-800 text-slate-400'
-                      )}
-                    >
-                      <span
-                        className={clsx(
-                          'w-2 h-2 rounded-full',
-                          aiAssistant.face_detected && aiAssistant.centered
-                            ? 'bg-emerald-400 animate-ping'
-                            : aiAssistant.face_detected
-                            ? 'bg-amber-400'
-                            : 'bg-slate-500'
-                        )}
-                      />
-                      {aiAssistant.face_detected
-                        ? (aiAssistant.centered ? 'AI Auto-Capturing' : 'Adjust Alignment')
-                        : (captureMethod === 'CCTV' && !targetLocked
-                            ? 'Click a face to register'
-                            : 'Searching for Face')}
-                    </div>
-                  </div>
-                )}
               </div>
 
               {/* Bottom actions (secondary — primary Review is in sticky top bar) */}

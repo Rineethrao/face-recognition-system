@@ -30,7 +30,7 @@ export interface CameraTestResult {
 }
 
 const apiClient = axios.create({
-  baseURL: '',
+  baseURL: '/api',
 })
 
 export const api = apiClient

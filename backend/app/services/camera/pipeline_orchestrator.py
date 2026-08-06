@@ -225,30 +225,6 @@ class PipelineOrchestrator:
                 for item in overlay_data:
                     self._draw_overlay(annotated, item)
 
-            # Subtle registration banner only (no face/person boxes on the stream)
-            try:
-                from app.services.registration.registration_engine import registration_engine
-                from app.services.registration.gallery_service import gallery_service
-                if registration_engine.is_registering and (
-                    registration_engine.locked_camera_id in (None, self.camera_id)
-                    or registration_engine.capture_method == "CCTV"
-                ):
-                    if annotated is frame:
-                        annotated = frame.copy()
-                    collected = len(gallery_service.samples)
-                    target_n = registration_engine.target_samples
-                    state = registration_engine.target_state
-                    if state in ("WAITING_FOR_SELECTION", "WAITING_FOR_TARGET"):
-                        overlay_text = "REGISTRATION: Click a face to begin"
-                    elif state in ("TARGET_LOST", "TARGET_TEMPORARILY_LOST"):
-                        overlay_text = "REGISTRATION: Target temporarily lost"
-                    else:
-                        overlay_text = f"REGISTRATION: Capturing {collected}/{target_n}"
-                    cv2.rectangle(annotated, (0, 0), (annotated.shape[1], 36), (30, 90, 200), -1)
-                    cv2.putText(annotated, overlay_text, (15, 24),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
-            except Exception:
-                pass
 
             # ── JPEG encode ───────────────────────────────────────────────────
             encode_start = time.monotonic()

@@ -35,6 +35,7 @@ class PersonImageModel(Base):
     gallery_version = Column(Integer)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    camera_id = Column(String(100), default='default')
     yaw = Column(Float, default=0.0)
     pitch = Column(Float, default=0.0)
     brightness = Column(Float, default=0.0)

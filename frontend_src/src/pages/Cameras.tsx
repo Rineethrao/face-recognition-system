@@ -617,7 +617,23 @@ export function Cameras() {
                     </div>
 
                     {/* Quick Action Overlay Buttons */}
-                    <div className="absolute top-3 right-3 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="absolute top-3 right-3 flex items-center gap-2 opacity-100 transition-opacity">
+                      <button
+                        onClick={() => toggleCameraEnabled(cam)}
+                        className={clsx(
+                          'flex items-center justify-center gap-2 px-3 py-1 rounded-full text-[11px] font-semibold transition-all border',
+                          cam.enabled
+                            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25'
+                            : 'bg-slate-800/90 text-slate-300 border-slate-700 hover:bg-slate-700'
+                        )}
+                        title="Toggle camera recognition on/off"
+                      >
+                        <span className={clsx(
+                          'w-3 h-3 rounded-full transition-colors',
+                          cam.enabled ? 'bg-emerald-400' : 'bg-slate-500'
+                        )} />
+                        {cam.enabled ? 'ON' : 'OFF'}
+                      </button>
                       <button
                         onClick={() => setPreviewCam(cam)}
                         className="w-8 h-8 rounded-xl bg-black/60 backdrop-blur-sm text-white flex items-center justify-center hover:bg-primary-500 transition-colors"

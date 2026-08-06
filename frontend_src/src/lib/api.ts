@@ -101,7 +101,7 @@ export interface PersonUpdatePayload {
 }
 
 const apiClient = axios.create({
-  baseURL: '',
+  baseURL: '/api',
 })
 
 export async function getHealth(): Promise<HealthData> {

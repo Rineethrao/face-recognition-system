@@ -61,6 +61,8 @@ def auto_migrate():
                     conn.execute(text("ALTER TABLE person_images ADD COLUMN brightness FLOAT DEFAULT 0.0"))
                 if "blur_score" not in p_cols:
                     conn.execute(text("ALTER TABLE person_images ADD COLUMN blur_score FLOAT DEFAULT 0.0"))
+                if "camera_id" not in p_cols:
+                    conn.execute(text("ALTER TABLE person_images ADD COLUMN camera_id VARCHAR(100) DEFAULT 'default'"))
                 conn.commit()
 
             # 2. Migrate embeddings table

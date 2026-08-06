@@ -9,6 +9,7 @@ import { TopBar } from '../components/TopBar'
 import { BrowserWebcam } from '../components/BrowserWebcam'
 import { useStore } from '../store/useStore'
 import { getCameras, getRecognitions, getDetectedFaces } from '../lib/api'
+import { updateCamera } from '../lib/cameraApi'
 import type { RecognitionEvent, DetectedFace } from '../lib/api'
 import { Card, CardHeader, CardTitle, CardBody } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
@@ -130,11 +131,14 @@ interface CameraCardProps {
   location: string
   isOnline: boolean
   camId: string
+  enabled: boolean
   onExpand?: () => void
+  onToggle?: () => void
   isSingle?: boolean
+  isToggling?: boolean
 }
 
-function CameraCard({ name, location, isOnline, camId, onExpand }: CameraCardProps) {
+function CameraCard({ name, location, isOnline, camId, enabled, onExpand, onToggle, isToggling }: CameraCardProps & { enabled: boolean; onToggle?: () => void; isToggling?: boolean }) {
   const imgRef = useRef<HTMLImageElement>(null)
   const [streamUrl, setStreamUrl] = useState(() => `/video_feed/${camId}`)
   const [hasError, setHasError] = useState(false)
@@ -191,7 +195,24 @@ function CameraCard({ name, location, isOnline, camId, onExpand }: CameraCardPro
         </div>
 
         {/* Actions */}
-        <div className="absolute top-2.5 right-2.5 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+        <div className="absolute top-2.5 right-2.5 flex items-center gap-2 opacity-100 z-10">
+          <button
+            onClick={onToggle}
+            disabled={isToggling}
+            className={clsx(
+              'flex items-center gap-2 rounded-full px-3 py-1 text-[11px] font-semibold transition-all border',
+              enabled
+                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25'
+                : 'bg-slate-800/90 text-slate-300 border-slate-700 hover:bg-slate-700'
+            )}
+            title="Toggle recognition on/off"
+          >
+            <span className={clsx(
+              'w-2.5 h-2.5 rounded-full',
+              enabled ? 'bg-emerald-400' : 'bg-slate-500'
+            )} />
+            {enabled ? 'ON' : 'OFF'}
+          </button>
           <button
             onClick={refreshStream}
             className="w-7 h-7 rounded-xl bg-black/70 backdrop-blur-md flex items-center justify-center text-white hover:bg-blue-600 transition-colors border border-white/10"
@@ -217,9 +238,25 @@ function CameraCard({ name, location, isOnline, camId, onExpand }: CameraCardPro
           <div className="text-xs font-bold text-white truncate">{name}</div>
           <div className="text-[10px] text-slate-400 truncate">{location} • ID: {camId}</div>
         </div>
-        <Badge variant={isOnline && !hasError ? 'success' : 'danger'} dot size="sm">
-          {isOnline && !hasError ? 'Online' : 'Offline'}
-        </Badge>
+        <div className="flex flex-col items-end gap-2">
+          <Badge variant={isOnline && !hasError ? 'success' : 'danger'} dot size="sm">
+            {isOnline && !hasError ? 'Online' : 'Offline'}
+          </Badge>
+          {onToggle ? (
+            <button
+              onClick={onToggle}
+              disabled={isToggling}
+              className={clsx(
+                'text-[11px] font-semibold px-3 py-1 rounded-full transition-colors border',
+                enabled
+                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/25 hover:bg-emerald-500/25'
+                  : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+              )}
+            >
+              {enabled ? 'Recognition ON' : 'Recognition OFF'}
+            </button>
+          ) : null}
+        </div>
       </div>
     </div>
   )
@@ -283,6 +320,38 @@ export function LiveRecognition() {
     if (count <= 4) return 'grid-cols-2 grid-rows-2 h-full'
     if (count <= 6) return 'grid-cols-3 grid-rows-2 h-full'
     return 'grid-cols-3 grid-rows-3 h-full'
+  }
+
+  const [togglingCameraId, setTogglingCameraId] = useState<string | null>(null)
+
+  const toggleCameraRecognition = async (cam: any) => {
+    const camId = cam.id || cam.camera_id
+    if (!camId) return
+    setTogglingCameraId(camId)
+    try {
+      await updateCamera(camId, {
+        id: camId,
+        camera_id: camId,
+        name: cam.name,
+        location: cam.location,
+        description: cam.description || '',
+        brand: cam.brand || 'Custom',
+        ip_address: cam.ip_address || '',
+        port: cam.port || 554,
+        username: cam.username || '',
+        password: cam.password || '',
+        channel: cam.channel || 1,
+        stream_type: cam.stream_type || 'sub',
+        enabled: !cam.enabled,
+        rotation: cam.rotation || 0,
+        source: cam.source || '',
+      })
+      await getCameras().then(setCameras)
+    } catch (err) {
+      console.error('Failed to toggle camera recognition:', err)
+    } finally {
+      setTogglingCameraId(null)
+    }
   }
 
   return (
@@ -382,17 +451,23 @@ export function LiveRecognition() {
             {showBrowserCam && (
               <BrowserWebcam onRecognized={() => getRecognitions(30).then(setEvents).catch(() => {})} />
             )}
-            {filteredCams.map((cam) => (
-              <CameraCard
-                key={cam.id}
-                camId={cam.id}
-                name={cam.name}
-                location={cam.location}
-                isOnline={cam.enabled && cam.status !== 'OFFLINE'}
-                onExpand={() => setLayout('1x1')}
-                isSingle={filteredCams.length === 1}
-              />
-            ))}
+            {filteredCams.map((cam) => {
+              const camId = cam.id || cam.camera_id
+              return (
+                <CameraCard
+                  key={camId}
+                  camId={camId}
+                  name={cam.name}
+                  location={cam.location}
+                  enabled={cam.enabled}
+                  isOnline={cam.enabled && cam.status !== 'OFFLINE'}
+                  onExpand={() => setLayout('1x1')}
+                  onToggle={() => toggleCameraRecognition(cam)}
+                  isToggling={togglingCameraId === camId}
+                  isSingle={filteredCams.length === 1}
+                />
+              )
+            })}
 
             {filteredCams.length === 0 && !showBrowserCam && (
               <EmptyState

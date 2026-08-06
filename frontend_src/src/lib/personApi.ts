@@ -23,7 +23,7 @@ export interface DetectedFaceMetadata {
 }
 
 const apiClient = axios.create({
-  baseURL: '',
+  baseURL: '/api',
 })
 
 export async function createPerson(payload: CreatePersonPayload): Promise<any> {

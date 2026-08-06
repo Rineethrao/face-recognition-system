@@ -56,6 +56,8 @@ export function AiAssistantPanel({
   const isWaiting = !state || state === 'WAITING_FOR_SELECTION' || state === 'WAITING_FOR_TARGET'
   const isLost = state === 'TARGET_LOST' || state === 'TARGET_TEMPORARILY_LOST'
   const isReady = state === 'READY_FOR_REVIEW'
+  const targetLabel = isWaiting ? 'No face selected' : isLost ? 'Target temporarily lost' : 'Target selected'
+  const captureState = isWaiting ? 'Waiting for target' : isLost ? 'Auto capture paused' : 'Auto capture active'
 
   const checks = [
     { label: 'Face detected', ok: faceDetected },
@@ -111,19 +113,19 @@ export function AiAssistantPanel({
             <div className="flex items-center gap-1.5">
               {isWaiting ? (
                 <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                  Click a face
+                  Waiting
                 </span>
               ) : isLost ? (
                 <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/20 animate-pulse">
-                  Temporarily lost
+                  Paused
                 </span>
               ) : isReady ? (
                 <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500/10 text-blue-300 border border-blue-500/20">
-                  Ready for review
+                  Ready
                 </span>
               ) : (
                 <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                  Target locked
+                  Locked
                 </span>
               )}
               {onChangeTarget && !isWaiting && (
@@ -134,6 +136,17 @@ export function AiAssistantPanel({
                   Change face
                 </button>
               )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 text-[11px]">
+            <div className="rounded-lg bg-slate-950/60 border border-slate-800 px-2.5 py-2">
+              <div className="text-[10px] uppercase tracking-wide text-slate-500">Target</div>
+              <div className="mt-1 font-semibold text-slate-200">{targetLabel}</div>
+            </div>
+            <div className="rounded-lg bg-slate-950/60 border border-slate-800 px-2.5 py-2">
+              <div className="text-[10px] uppercase tracking-wide text-slate-500">Capture state</div>
+              <div className="mt-1 font-semibold text-slate-200">{captureState}</div>
             </div>
           </div>
 
@@ -168,7 +181,7 @@ export function AiAssistantPanel({
 
           {isWaiting && (
             <p className="text-[11px] text-amber-300 leading-snug">
-              Click the face of the person you want to register in the live CCTV view.
+              Click the face of the person you want to register in the CCTV view.
             </p>
           )}
           {isLost && (
@@ -231,7 +244,7 @@ export function AiAssistantPanel({
         </div>
         <div>
           <div className="text-[11px] uppercase tracking-wider text-amber-400 font-bold">
-            {nextNeededPose ? `Next: ${nextNeededPose.replace(/_/g, ' ')}` : 'Guidance'}
+            {nextNeededPose ? `Next: ${nextNeededPose.replace(/_/g, ' ')}` : 'Instructions'}
           </div>
           <div className="text-xs font-medium text-slate-200 mt-0.5 leading-snug">
             {guidanceText}
