@@ -94,7 +94,7 @@ class ProgressiveLearningEngine:
             if len(active_images) < max_gallery_samples:
                 # Option A: Add new active image to gallery
                 person.gallery_version += 1
-                person.updated_at = datetime.utcnow()
+                person.updated_at = datetime.now()
 
                 filename = f"gallery_v{person.gallery_version}_auto_{int(time.time())}.jpg"
                 dest_path = person_dir / filename
@@ -108,7 +108,7 @@ class ProgressiveLearningEngine:
                     gallery_version=person.gallery_version,
                     is_active=True,
                     camera_id=camera_id,
-                    created_at=datetime.utcnow()
+                    created_at=datetime.now()
                 )
                 db.add(new_p_img)
                 db.commit()
@@ -122,7 +122,7 @@ class ProgressiveLearningEngine:
                     image_path=str(dest_path),
                     gallery_version=person.gallery_version,
                     is_active=True,
-                    created_at=datetime.utcnow()
+                    created_at=datetime.now()
                 )
                 db.add(emb_rec)
 

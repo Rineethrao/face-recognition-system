@@ -6,6 +6,7 @@ import { Dashboard } from './pages/Dashboard'
 import { LiveRecognition } from './pages/LiveRecognition'
 import { Cameras } from './pages/Cameras'
 import { Persons } from './pages/Persons'
+import { VisitorTracking } from './pages/VisitorTracking'
 import { RegisterPerson } from './pages/RegisterPerson'
 import { Events } from './pages/Events'
 import { Analytics } from './pages/Analytics'
@@ -36,6 +37,7 @@ export default function App() {
             <Route path="/live" element={<LiveRecognition />} />
             <Route path="/cameras" element={<Cameras />} />
             <Route path="/persons" element={<Persons />} />
+            <Route path="/visitors" element={<VisitorTracking />} />
             <Route path="/register" element={<RegisterPerson />} />
             <Route path="/events" element={<Events />} />
             <Route path="/analytics" element={<Analytics />} />

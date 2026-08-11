@@ -19,7 +19,7 @@ class PersonModel(Base):
     notes = Column(String(1000))
     gallery_version = Column(Integer, default=1)
     source_candidate_id = Column(String(100))
-    registered_at = Column(DateTime, default=datetime.utcnow)
+    registered_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime)
     
     embeddings = relationship("EmbeddingModel", back_populates="person")
@@ -34,7 +34,8 @@ class PersonImageModel(Base):
     pose_bin = Column(String)
     gallery_version = Column(Integer)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    camera_id = Column(String(100), default='default')
     yaw = Column(Float, default=0.0)
     pitch = Column(Float, default=0.0)
     brightness = Column(Float, default=0.0)
@@ -51,7 +52,7 @@ class EmbeddingModel(Base):
     image_path = Column(String)
     gallery_version = Column(Integer, default=1)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
     archived_at = Column(DateTime)
     
     person = relationship("PersonModel", back_populates="embeddings")
@@ -65,7 +66,7 @@ class CandidateModel(Base):
     seen_cameras = Column(Text)
     first_seen = Column(DateTime)
     last_seen = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
     
     images = relationship("CandidateImageModel", back_populates="candidate")
 
@@ -78,7 +79,7 @@ class CandidateImageModel(Base):
     quality_score = Column(Float)
     pose_bin = Column(String)
     camera_id = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
     
     candidate = relationship("CandidateModel", back_populates="images")
 
@@ -88,7 +89,7 @@ class AuditLogModel(Base):
     action = Column(String)
     person_id = Column(String)
     details = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
 class RecognitionLogModel(Base):
     __tablename__ = 'recognition_logs'
@@ -97,12 +98,12 @@ class RecognitionLogModel(Base):
     name = Column(String(200))
     similarity = Column(Float)
     track_id = Column(Integer)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=datetime.now)
     camera_id = Column(String(100), default='default')
     embedding_version = Column(Integer, default=1)
     quality_score = Column(Float, default=0.0)
     face_snapshot_path = Column(String(500))
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
 class CameraModel(Base):
     __tablename__ = 'cameras'
@@ -117,4 +118,10 @@ class CameraModel(Base):
     status = Column(String(50), default="DISCONNECTED")
     last_heartbeat = Column(DateTime)
     error_count = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+
+# Register visitor & presence models into metadata
+from app.visitors.models import VisitorModel, VisitorFaceSampleModel, VisitorSightingModel
+from app.models.presence_models import PersonSessionModel, DailyReportModel
+
+

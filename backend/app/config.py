@@ -99,6 +99,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "reconnect_interval": 5,
         "max_reconnect_attempts": 20,
         "gpu_enabled": "auto"
+    },
+    "visitors": {
+        "match_high": 0.45,
+        "match_low": 0.35,
+        "registered_match_threshold": 0.55,
+        "candidate_match_margin": 0.002,
+        "min_observations_for_new_visitor": 4,
+        "min_observation_quality": 0.55,
+        "max_samples_per_visitor": 10,
+        "operational_day_start_hour": 0
     }
 }
 
@@ -226,8 +236,52 @@ class Settings:
             self.STREAM_FPS = max(self.STREAM_FPS, 30)
 
         # Ensure storage directories exist
+        self.VISITORS_DIR: Path = BASE_DIR / "storage" / "visitors"
         os.makedirs(self.FACES_DIR, exist_ok=True)
         os.makedirs(self.EMBEDDINGS_DIR, exist_ok=True)
+        os.makedirs(self.VISITORS_DIR, exist_ok=True)
+
+        # ── Visitor Re-ID Configuration ─────────────────────────────────────
+        _vis = self.raw_config.get("visitors", {})
+        self.VISITOR_MATCH_HIGH_THRESHOLD: float = float(_vis.get("match_high", 0.58))
+        self.VISITOR_MATCH_LOW_THRESHOLD: float = float(_vis.get("match_low", 0.45))
+        self.VISITOR_MATCH_HIGH: float = self.VISITOR_MATCH_HIGH_THRESHOLD
+        self.VISITOR_MATCH_LOW: float = self.VISITOR_MATCH_LOW_THRESHOLD
+        self.REGISTERED_CONFIRMED_THRESHOLD: float = float(_vis.get("registered_confirmed_threshold", 0.40))
+        self.VISITOR_REGISTERED_MATCH_THRESHOLD: float = self.REGISTERED_CONFIRMED_THRESHOLD
+        self.VISITOR_CONFIRMED_THRESHOLD: float = float(_vis.get("visitor_confirmed_threshold", 0.58))
+        self.VISITOR_PENDING_THRESHOLD: float = float(_vis.get("visitor_pending_threshold", 0.45))
+        self.VISITOR_PROFILE_UPDATE_THRESHOLD: float = float(_vis.get("visitor_profile_update_threshold", 0.60))
+        self.TRACK_CONFLICT_THRESHOLD: float = float(_vis.get("track_conflict_threshold", 0.45))
+        self.NEW_VISITOR_INTERNAL_CONSISTENCY_THRESHOLD: float = float(_vis.get("new_visitor_internal_consistency", 0.58))
+        self.AVATAR_IMPROVEMENT_MARGIN: float = float(_vis.get("avatar_improvement_margin", 0.08))
+        self.VISITOR_CANDIDATE_MATCH_MARGIN: float = float(_vis.get("candidate_match_margin", 0.020))
+
+
+        self.VISITOR_QUALITY_POOR_THRESH: float = float(_vis.get("quality_poor_threshold", 0.35))
+        self.VISITOR_QUALITY_MATCHING_THRESH: float = float(_vis.get("quality_matching_threshold", 0.45))
+        self.VISITOR_QUALITY_ENROLLMENT_THRESH: float = float(_vis.get("quality_enrollment_threshold", 0.52))
+        self.VISITOR_QUALITY_AVATAR_THRESH: float = float(_vis.get("quality_avatar_threshold", 0.65))
+
+        self.VISITOR_MIN_FACE_WIDTH: int = int(_vis.get("min_face_width", 22))
+        self.VISITOR_MIN_FACE_HEIGHT: int = int(_vis.get("min_face_height", 22))
+        self.VISITOR_MAX_ABS_YAW: float = float(_vis.get("max_abs_yaw", 0.22))
+        self.VISITOR_MAX_ABS_PITCH: float = float(_vis.get("max_abs_pitch", 0.18))
+        self.VISITOR_MIN_BLUR_SCORE: float = float(_vis.get("min_blur_score", 15.0))
+
+        self.VISITOR_MIN_OBSERVATIONS_FOR_NEW: int = int(_vis.get("min_observations_for_new_visitor", 4))
+        self.VISITOR_WITHIN_TRACK_CONSISTENCY_THRESH: float = float(_vis.get("within_track_consistency_thresh", 0.48))
+        self.VISITOR_MAX_SAMPLES: int = int(_vis.get("max_samples_per_visitor", 8))
+        self.VISITOR_OPERATIONAL_DAY_START_HOUR: int = int(_vis.get("operational_day_start_hour", 0))
+        self.VISITOR_DUPLICATE_FLAG_THRESHOLD: float = float(_vis.get("duplicate_flag_threshold", 0.44))
+
+        # Presence duration tracking
+        _pres = self.raw_config.get("presence", {})
+        self.PRESENCE_SESSION_TIMEOUT_SECONDS: int = int(_pres.get("session_timeout_seconds", 30))
+        self.PRESENCE_REPORT_BOUNDARY: str = str(_pres.get("report_boundary", "00:00"))
+        self.PRESENCE_ENABLE_LIVE_DURATION: bool = bool(_pres.get("enable_live_duration", True))
+
+
 
     @staticmethod
     def _detect_gpu(setting) -> bool:

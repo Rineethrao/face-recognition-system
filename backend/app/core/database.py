@@ -61,6 +61,8 @@ def auto_migrate():
                     conn.execute(text("ALTER TABLE person_images ADD COLUMN brightness FLOAT DEFAULT 0.0"))
                 if "blur_score" not in p_cols:
                     conn.execute(text("ALTER TABLE person_images ADD COLUMN blur_score FLOAT DEFAULT 0.0"))
+                if "camera_id" not in p_cols:
+                    conn.execute(text("ALTER TABLE person_images ADD COLUMN camera_id VARCHAR(100) DEFAULT 'default'"))
                 conn.commit()
 
             # 2. Migrate embeddings table
@@ -91,9 +93,26 @@ def auto_migrate():
                     conn.execute(text("ALTER TABLE recognition_logs ADD COLUMN face_snapshot_path VARCHAR(500)"))
                 conn.commit()
 
+            # 4. Migrate visitors table
+            res = conn.execute(text("PRAGMA table_info(visitors)")).fetchall()
+            v_cols = {row[1] for row in res} if res else set()
+            if v_cols:
+                if "created_date" not in v_cols:
+                    conn.execute(text("ALTER TABLE visitors ADD COLUMN created_date VARCHAR(20)"))
+                conn.commit()
+
+            # 5. Migrate visitor_face_samples table
+            res = conn.execute(text("PRAGMA table_info(visitor_face_samples)")).fetchall()
+            vs_cols = {row[1] for row in res} if res else set()
+            if vs_cols:
+                if "gallery_eligible" not in vs_cols:
+                    conn.execute(text("ALTER TABLE visitor_face_samples ADD COLUMN gallery_eligible BOOLEAN DEFAULT 1"))
+                conn.commit()
+
             logger.info("Database schema auto-migration completed successfully.")
     except Exception as e:
         logger.error(f"Error during database auto-migration: {e}")
+
 
 def init_db():
     """Create all database tables and apply schema migrations."""

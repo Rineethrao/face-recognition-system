@@ -100,7 +100,7 @@ def analyze_frame(req: FrameAnalyzeRequest):
     # consensus engine, since there's no track-based voting to smooth noise.
     strong_threshold = max(settings.RECOGNITION_SIMILARITY_THRESHOLD, 0.50)
 
-    for face in faces:
+    for idx, face in enumerate(faces):
         bbox = face.bbox
         landmarks = face.landmarks or []
         entry: Dict[str, Any] = {
@@ -140,9 +140,48 @@ def analyze_frame(req: FrameAnalyzeRequest):
                         similarity=entry["similarity"],
                         quality_score=float(blur_score) if is_good is not None else 0.0,
                     )
-            elif best:
-                entry["similarity"] = round(float(best["similarity"]), 4)
-                entry["status"] = "low_confidence"
+            else:
+                # Registered recognition returned no match -> Route to VisitorManager
+                try:
+                    from app.visitors.visitor_manager import visitor_manager
+                    from app.visitors.face_quality import visitor_quality_evaluator
+                    db = SessionLocal()
+                    try:
+                        quality_res = visitor_quality_evaluator.evaluate_quality(frame, bbox, landmarks)
+                        track_id = f"browser_track_{idx+1}"
+                        vis_res = visitor_manager.resolve_unregistered_track(
+                            db=db,
+                            camera_id=camera_id,
+                            track_id=track_id,
+                            embedding=embedding,
+                            quality_res=quality_res,
+                            crop_img=aligned
+                        )
+                        if vis_res.is_resolved:
+                            entry["person_id"] = vis_res.visitor_code
+                            entry["name"] = vis_res.visitor_code
+                            entry["similarity"] = vis_res.similarity
+                            entry["status"] = "visitor"
+
+                            if req.log_events:
+                                _maybe_log_event(
+                                    camera_id=camera_id,
+                                    person_id=vis_res.visitor_code,
+                                    name=vis_res.visitor_code,
+                                    similarity=vis_res.similarity,
+                                    quality_score=float(blur_score) if is_good else 0.0,
+                                )
+                        else:
+                            entry["person_id"] = "unknown"
+                            entry["name"] = vis_res.visitor_code
+                            entry["similarity"] = 0.0
+                            entry["status"] = "identifying"
+                    finally:
+                        db.close()
+                except Exception as vis_err:
+                    logger.error(f"Error in browser visitor resolution: {vis_err}")
+                    entry["similarity"] = round(float(best["similarity"]), 4) if best else 0.0
+                    entry["status"] = "low_confidence"
         else:
             entry["status"] = "no_landmarks"
 

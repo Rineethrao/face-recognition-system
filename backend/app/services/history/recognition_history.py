@@ -41,8 +41,20 @@ class RecognitionHistoryService:
                 RecognitionLogModel.track_id == str(match.track_id)
             ).order_by(RecognitionLogModel.timestamp.desc()).first()
 
+            # Always trigger presence session duration & last_seen update for detected person
+            try:
+                from app.services.presence_service import presence_service
+                presence_service.on_person_detected(
+                    db=db,
+                    person_id=match.person_id,
+                    person_name=match.name,
+                    camera_id=match.camera_id
+                )
+            except Exception as pres_err:
+                logger.warning(f"Presence tracking hook warning: {pres_err}")
+
             if recent:
-                time_diff = (datetime.utcnow() - recent.timestamp).total_seconds()
+                time_diff = (datetime.now() - recent.timestamp).total_seconds()
                 if time_diff < 5.0:
                     return recent.id
 
@@ -62,14 +74,27 @@ class RecognitionHistoryService:
                 embedding_version=embedding_version,
                 quality_score=quality_score,
                 face_snapshot_path=snapshot_path,
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now()
             )
             db.add(log_entry)
             db.commit()
             db.refresh(log_entry)
 
+            # Trigger presence session tracking
+            try:
+                from app.services.presence_service import presence_service
+                presence_service.on_person_detected(
+                    db=db,
+                    person_id=match.person_id,
+                    person_name=match.name,
+                    camera_id=match.camera_id
+                )
+            except Exception as pres_err:
+                logger.warning(f"Presence tracking hook warning: {pres_err}")
+
             logger.info(f"[HISTORY LOG] {match.name} ({match.person_id}) on camera '{match.camera_id}' | Sim: {match.similarity:.2f}")
             return log_entry.id
+
 
         except Exception as e:
             db.rollback()

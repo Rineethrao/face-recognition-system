@@ -360,11 +360,11 @@ def _make_connecting_frame(cam_name: str, details: str) -> bytes:
     return buf.tobytes()
 
 
-def generate_mjpeg_stream_v2(camera_id: Optional[str] = None):
+def generate_mjpeg_stream_v2(camera_id: Optional[str] = None, raw: bool = False):
     """
     STRICTLY ISOLATED MJPEG stream generator per camera_id.
-    Reads pre-encoded JPEG bytes ONLY from the specific camera worker's AnnotatedFrameBuffer.
-    NEVER bleeds other camera streams.
+    Reads pre-encoded JPEG bytes ONLY from the specific camera worker.
+    When raw=True, streams pure camera feed without face detection/recognition overlays.
     """
     stream_fps = getattr(settings, 'STREAM_FPS', 25)
     frame_interval = 1.0 / max(1, stream_fps)
@@ -402,14 +402,25 @@ def generate_mjpeg_stream_v2(camera_id: Optional[str] = None):
                     target_worker = next(iter(workers.values()))
 
             if target_worker:
-                # Prefer annotated JPEG even during brief reconnect blips
-                jpeg_bytes, ts = target_worker.annotated_buffer.get_jpeg_with_timestamp()
-                if not jpeg_bytes and target_worker.is_active():
+                if raw:
+                    ret, frame = target_worker.stream_manager.frame_buffer.peek()
+                    if ret and frame is not None:
+                        ret_enc, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                        if ret_enc:
+                            jpeg_bytes = buf.tobytes()
+                            ts = target_worker.stream_manager.frame_buffer.timestamp
+                else:
+                    # Prefer annotated JPEG even during brief reconnect blips
                     jpeg_bytes, ts = target_worker.annotated_buffer.get_jpeg_with_timestamp()
+                    if not jpeg_bytes and target_worker.is_active():
+                        jpeg_bytes, ts = target_worker.annotated_buffer.get_jpeg_with_timestamp()
             else:
                 # Fallback to legacy single-camera detection_service if active
                 from app.services.detection_service import detection_service
-                ok, frame = detection_service.get_latest_annotated_frame()
+                if raw:
+                    ok, frame = detection_service.get_latest_frame()
+                else:
+                    ok, frame = detection_service.get_latest_annotated_frame()
                 if ok and frame is not None:
                     ret_enc, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
                     if ret_enc:
@@ -446,9 +457,9 @@ def generate_mjpeg_stream_v2(camera_id: Optional[str] = None):
 @router.get("/video_feed")
 @router.get("/video_feed/{camera_id}")
 @router.get("/cameras/{camera_id}/stream")
-def video_feed(camera_id: Optional[str] = None):
+def video_feed(camera_id: Optional[str] = None, raw: bool = False):
     """Live MJPEG video stream endpoint for a specific camera ID."""
     return StreamingResponse(
-        generate_mjpeg_stream_v2(camera_id),
+        generate_mjpeg_stream_v2(camera_id, raw=raw),
         media_type="multipart/x-mixed-replace; boundary=frame"
     )

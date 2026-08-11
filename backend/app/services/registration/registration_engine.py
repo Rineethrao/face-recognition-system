@@ -141,24 +141,22 @@ class RegistrationEngine:
         self.target_last_seen = None
         self.target_face_bbox = None
         self.target_thumbnail = None
-        self.temporary_target_embeddings = []
-        self.temporary_target_centroid = None
+        if not gallery_service.samples:
+            self.temporary_target_embeddings = []
+            self.temporary_target_centroid = None
+            self.pose_coverage = {p: False for p in pose_service.cctv_required_poses()}
         self.target_lost_since = None
         self.last_capture_time = 0.0
         self.last_target_similarity = 0.0
-        self.pose_coverage = {p: False for p in pose_service.cctv_required_poses()}
 
-    def cancel_session(self) -> Dict[str, Any]:
-        gallery_service.clear()
+    def unlock_target(self) -> Dict[str, Any]:
+        self.target_state = "WAITING_FOR_SELECTION"
+        self.target_locked = False
+        self.target_track_id = None
+        self.target_face_bbox = None
         capture_service.unlock_track()
-        self.is_registering = False
-        sid = self.session_id
-        self._reset_target_state()
-        self.session_id = None
-        self.person_id = None
-        self.person_name = None
-        logger.info("REG_SESSION_CANCELLED session=%s", sid)
-        return {"status": "success", "message": "Registration session cancelled"}
+        logger.info("REG_TARGET_UNLOCKED (retaining %d gallery samples)", len(gallery_service.samples))
+        return {"status": "success", "message": "Target unlocked", "state": self.target_state}
 
     # ── Face selection (click-to-lock) ───────────────────────────────────────
 
@@ -170,6 +168,7 @@ class RegistrationEngine:
     ) -> Dict[str, Any]:
         """
         Operator clicked a face. Extract reference embedding and enter TARGET_LOCKED.
+        Preserves existing gallery samples if the selected face matches current target identity.
         """
         if not self.is_registering:
             return {"status": "error", "message": "No active registration session"}
@@ -186,12 +185,39 @@ class RegistrationEngine:
         if embedding is None:
             return {"status": "error", "message": "Could not extract face embedding"}
 
-        # Clear previous capture if re-selecting
-        if self.target_locked and gallery_service.samples:
-            gallery_service.clear()
+        # Check if re-selecting the SAME identity or a DIFFERENT identity
+        ref_centroid = self.temporary_target_centroid
+        if ref_centroid is None and gallery_service.samples:
+            sample_embs = [s["embedding"] for s in gallery_service.samples if s.get("embedding") is not None]
+            if sample_embs:
+                mean_vec = np.mean(sample_embs, axis=0)
+                ref_centroid = mean_vec / (np.linalg.norm(mean_vec) + 1e-8)
 
-        self.temporary_target_embeddings = [embedding.copy()]
-        self.temporary_target_centroid = embedding / (np.linalg.norm(embedding) + 1e-8)
+        is_same_identity = False
+        if ref_centroid is not None and embedding is not None:
+            sim = float(np.dot(embedding, ref_centroid))
+            if sim >= 0.55:  # Permissive similarity for CCTV re-locking angles
+                is_same_identity = True
+
+        if not is_same_identity and gallery_service.samples:
+            # Different identity selected — clear previous gallery for new person
+            gallery_service.clear()
+            self.temporary_target_embeddings = [embedding.copy()]
+            self.pose_coverage = {p: False for p in pose_service.cctv_required_poses()}
+            logger.info("DIFFERENT_TARGET_SELECTED: Cleared previous gallery samples.")
+        elif is_same_identity or gallery_service.samples:
+            # Same target re-selected / re-acquired — KEEP existing gallery samples!
+            self.temporary_target_embeddings.append(embedding.copy())
+            logger.info("SAME_TARGET_REACQUIRED: Preserved %d existing gallery samples.", len(gallery_service.samples))
+        else:
+            self.temporary_target_embeddings = [embedding.copy()]
+            self.pose_coverage = {p: False for p in pose_service.cctv_required_poses()}
+
+        # Update centroid reference vector
+        embs_arr = np.array(self.temporary_target_embeddings)
+        mean_emb = np.mean(embs_arr, axis=0)
+        self.temporary_target_centroid = mean_emb / (np.linalg.norm(mean_emb) + 1e-8)
+
         self.target_face_bbox = [float(v) for v in face.bbox]
         self.target_track_id = getattr(face, "track_id", None)  # internal continuity hint only
         self.locked_camera_id = camera_id
@@ -201,7 +227,6 @@ class RegistrationEngine:
         self.target_lost_since = None
         self.target_last_seen = time.time()
         self.last_target_similarity = 1.0
-        self.pose_coverage = {p: False for p in pose_service.cctv_required_poses()}
 
         capture_service.lock_face(camera_id=camera_id, internal_track_id=self.target_track_id)
 
@@ -210,10 +235,13 @@ class RegistrationEngine:
             self.target_thumbnail = "data:image/jpeg;base64," + base64.b64encode(buf).decode("utf-8")
 
         logger.info(
-            "FACE_SELECTED camera=%s bbox=%s TARGET_LOCKED",
+            "FACE_SELECTED camera=%s bbox=%s TARGET_LOCKED (samples preserved: %d)",
             camera_id,
             self.target_face_bbox,
+            len(gallery_service.samples)
         )
+
+
         return {
             "status": "success",
             "message": "Face selected. Target locked.",
@@ -429,24 +457,65 @@ class RegistrationEngine:
         if target_face is None:
             if self.target_lost_since is None:
                 self.target_lost_since = now
-                logger.info("TARGET_LOST camera=%s similarity=%.3f", self.locked_camera_id, identity_sim)
-            self.target_state = "TARGET_LOST"
-            return self._lost_payload()
+                logger.info("TARGET_LOST_BUFFERING camera=%s similarity=%.3f", self.locked_camera_id, identity_sim)
+
+            # Allow 3.5 seconds grace period before marking target LOST
+            grace_sec = 3.5
+            if (now - self.target_lost_since) > grace_sec:
+                self.target_state = "TARGET_LOST"
+                return self._lost_payload()
+            else:
+                # Retain TARGET_LOCKED status during brief head turns/occlusions
+                return {
+                    "is_registering": True,
+                    "state": "TARGET_LOCKED",
+                    "target": self._target_payload(visible=False, identity_verified=False),
+                    "samples_collected": len(gallery_service.samples),
+                    "target_samples": self.target_samples,
+                    "min_samples": settings.REGISTRATION_MIN_SAMPLES,
+                    "max_samples": settings.REGISTRATION_MAX_SAMPLES,
+                    "progress_percent": int(
+                        min(1.0, len(gallery_service.samples) / max(1, self.target_samples)) * 100
+                    ),
+                    "pose_coverage": dict(self.pose_coverage),
+                    "ai_assistant": {
+                        "face_detected": False,
+                        "centered": False,
+                        "sharp": False,
+                        "lighting": False,
+                        "eyes_visible": False,
+                        "identity_verified": False,
+                        "guidance": "Tracking target face... Hold steady",
+                        "status": "Tracking target face...",
+                    },
+                    "gallery": gallery_service.get_formatted_gallery(),
+                }
 
         # Reacquired or still locked
         was_lost = self.target_state == "TARGET_LOST"
         if was_lost:
             logger.info(
-                "TARGET_REACQUIRED camera=%s similarity=%.3f",
+                "TARGET_REACQUIRED camera=%s similarity=%.3f (retaining %d gallery samples)",
                 self.locked_camera_id,
                 identity_sim,
+                len(gallery_service.samples)
             )
 
         self.target_lost_since = None
-        self.target_face_bbox = [float(v) for v in target_face.bbox]
+        new_bbox = [float(v) for v in target_face.bbox]
+        if self.target_face_bbox is not None and len(self.target_face_bbox) == 4:
+            alpha = 0.65  # 65% new, 35% previous for smooth visual continuity
+            self.target_face_bbox = [
+                alpha * new_bbox[i] + (1.0 - alpha) * self.target_face_bbox[i]
+                for i in range(4)
+            ]
+        else:
+            self.target_face_bbox = new_bbox
+
         self.target_track_id = getattr(target_face, "track_id", self.target_track_id)
         self.target_last_seen = now
         self.target_state = "TARGET_LOCKED"
+
 
         # 3. Quality gates (only for selected target)
         quality_res = quality_service.evaluate_quality(

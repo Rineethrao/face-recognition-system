@@ -57,7 +57,7 @@ class CandidateManager:
 
         db = SessionLocal()
         try:
-            now = datetime.utcnow()
+            now = datetime.now()
             candidate = CandidateModel(
                 candidate_id=candidate_id,
                 status="READY",

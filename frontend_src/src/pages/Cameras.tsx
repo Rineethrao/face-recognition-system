@@ -290,7 +290,7 @@ function AddEditCameraWizard({ initial, onSuccess, onClose }: WizardProps) {
                   value={form.stream_type}
                   onChange={e => setForm(f => ({ ...f, stream_type: e.target.value }))}
                 >
-                  <option value="sub">Sub Stream (Recommended for AI)</option>
+                  <option value="sub">Sub Stream (Secondary Stream)</option>
                   <option value="main">Main Stream (High Resolution)</option>
                 </select>
               </div>
@@ -334,7 +334,7 @@ function AddEditCameraWizard({ initial, onSuccess, onClose }: WizardProps) {
                   )} />
                 </button>
                 <span className="text-xs font-semibold text-slate-300">
-                  {form.enabled ? 'AI Enabled' : 'AI Paused'}
+                  {form.enabled ? 'Camera Active' : 'Camera Disabled'}
                 </span>
               </div>
             </div>
@@ -617,7 +617,7 @@ export function Cameras() {
                     </div>
 
                     {/* Quick Action Overlay Buttons */}
-                    <div className="absolute top-3 right-3 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="absolute top-3 right-3 flex items-center gap-2 opacity-100 transition-opacity">
                       <button
                         onClick={() => setPreviewCam(cam)}
                         className="w-8 h-8 rounded-xl bg-black/60 backdrop-blur-sm text-white flex items-center justify-center hover:bg-primary-500 transition-colors"
@@ -643,23 +643,7 @@ export function Cameras() {
                       </div>
                     </div>
 
-                    {/* Recognition Activity & Metadata */}
-                    <div className="border-t border-slate-200 dark:border-white/5 pt-3 space-y-2 text-xs text-slate-500 dark:text-slate-400">
-                      <div className="flex justify-between">
-                        <span>AI Recognition</span>
-                        <span className={cam.enabled ? 'text-green-400 font-semibold' : 'text-slate-500'}>
-                          {cam.enabled ? 'Active' : 'Paused'}
-                        </span>
-                      </div>
-                      {cam.last_recognition ? (
-                        <div className="flex justify-between text-[11px]">
-                          <span>Last Seen</span>
-                          <span className="text-blue-600 dark:text-primary-400 font-semibold">
-                            {cam.last_recognition.name} ({formatLocalDateTime(cam.last_recognition.recognized_at)})
-                          </span>
-                        </div>
-                      ) : null}
-                    </div>
+
 
                     {/* Card Actions */}
                     <div className="flex gap-2 border-t border-slate-200 dark:border-white/5 pt-3">
@@ -672,7 +656,7 @@ export function Cameras() {
                             : 'bg-slate-100 dark:bg-slate-700/50 text-slate-600 dark:text-slate-400 border border-slate-300 dark:border-slate-600 hover:text-slate-900 dark:hover:text-white'
                         )}
                       >
-                        {cam.enabled ? '● Enabled' : '○ Disabled'}
+                        {cam.enabled ? '● Camera Active' : '○ Disabled'}
                       </button>
 
                       <button
@@ -743,7 +727,7 @@ export function Cameras() {
               <h3 className="font-bold text-white text-base">Delete Camera?</h3>
               <p className="text-xs text-slate-400 mt-1">
                 Are you sure you want to delete <strong className="text-white">{deleteConfirm.name}</strong>?
-                This will update <code className="text-primary-400">cameras.json</code> and stop the AI worker thread.
+                This will update <code className="text-primary-400">cameras.json</code> and stop the camera worker thread.
               </p>
             </div>
             <div className="flex gap-2">

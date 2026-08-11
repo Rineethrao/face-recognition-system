@@ -125,7 +125,7 @@ class FaceRegistrationService:
                 person_id=person_id,
                 name=name,
                 gallery_version=1,
-                registered_at=datetime.utcnow()
+                registered_at=datetime.now()
             )
             db.add(person)
             db.commit()
@@ -148,7 +148,7 @@ class FaceRegistrationService:
                     pose_bin="FRONTAL",
                     gallery_version=1,
                     is_active=True,
-                    created_at=datetime.utcnow()
+                    created_at=datetime.now()
                 )
                 db.add(p_img)
                 db.commit()
@@ -161,7 +161,7 @@ class FaceRegistrationService:
                     image_path=str(image_path),
                     gallery_version=1,
                     is_active=True,
-                    created_at=datetime.utcnow()
+                    created_at=datetime.now()
                 )
                 db.add(emb_record)
 
@@ -221,7 +221,7 @@ class FaceRegistrationService:
                 department=department,
                 role=role,
                 gallery_version=1,
-                registered_at=datetime.utcnow()
+                registered_at=datetime.now()
             )
             db.add(person)
             db.commit()
@@ -244,7 +244,7 @@ class FaceRegistrationService:
                     pose_bin="FRONTAL",
                     gallery_version=1,
                     is_active=True,
-                    created_at=datetime.utcnow()
+                    created_at=datetime.now()
                 )
                 db.add(p_img)
                 db.commit()
@@ -257,7 +257,7 @@ class FaceRegistrationService:
                     image_path=str(img_path),
                     gallery_version=1,
                     is_active=True,
-                    created_at=datetime.utcnow()
+                    created_at=datetime.now()
                 )
                 db.add(emb_record)
 
@@ -293,7 +293,7 @@ class FaceRegistrationService:
                 person_id=person_id,
                 name=name,
                 gallery_version=1,
-                registered_at=datetime.utcnow()
+                registered_at=datetime.now()
             )
             db.add(person)
             db.commit()
@@ -313,7 +313,7 @@ class FaceRegistrationService:
                 pose_bin="FRONTAL",
                 gallery_version=1,
                 is_active=True,
-                created_at=datetime.utcnow()
+                created_at=datetime.now()
             )
             db.add(p_img)
             db.commit()
@@ -326,7 +326,7 @@ class FaceRegistrationService:
                 image_path=str(img_path),
                 gallery_version=1,
                 is_active=True,
-                created_at=datetime.utcnow()
+                created_at=datetime.now()
             )
             db.add(emb_record)
             db.commit()

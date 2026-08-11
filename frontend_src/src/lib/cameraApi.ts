@@ -30,7 +30,7 @@ export interface CameraTestResult {
 }
 
 const apiClient = axios.create({
-  baseURL: '',
+  baseURL: '/api',
 })
 
 export const api = apiClient
@@ -65,6 +65,6 @@ export async function testCameraConnection(payload: any): Promise<CameraTestResu
   return response.data.data
 }
 
-export function getStreamUrl(cameraId: string): string {
-  return `/video_feed/${encodeURIComponent(cameraId)}`
+export function getStreamUrl(cameraId: string, raw: boolean = true): string {
+  return `/video_feed/${encodeURIComponent(cameraId)}${raw ? '?raw=true' : ''}`
 }

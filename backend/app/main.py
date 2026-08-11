@@ -1,6 +1,9 @@
 import os
+import time
+import threading
 import logging
 from contextlib import asynccontextmanager
+
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +25,7 @@ from app.api.person_gallery import router as person_gallery_router
 from app.api.history import router as history_router
 from app.api.browser_camera import router as browser_camera_router
 from app.api.reports import router as reports_router
+from app.api.visitors import router as visitors_router
 
 # Configure Logging
 logging.basicConfig(
@@ -81,6 +85,141 @@ def prune_database_orphans():
     finally:
         db.close()
 
+def self_heal_visitor_avatars():
+    """
+    Startup self-healing routine for visitors:
+    1. Reconstructs missing VisitorModel records from RecognitionLogModel if purged.
+    2. Ensures every VisitorModel in database has a valid primary_snapshot_path.
+    """
+    import os
+    import shutil
+    import logging
+    from datetime import datetime
+    from app.core.database import SessionLocal
+    from app.visitors.models import VisitorModel, VisitorSightingModel, VisitorFaceSampleModel
+    from app.models.db_models import RecognitionLogModel
+    from app.visitors.visitor_repository import get_visitor_folder_paths
+
+    logger = logging.getLogger("VisitorSelfHealing")
+    db = SessionLocal()
+    try:
+        # Step 1: Reconstruct missing visitor profiles from RecognitionLogModel
+        vis_logs = db.query(RecognitionLogModel).filter(RecognitionLogModel.person_id.like('VISITOR-%')).all()
+        by_code = {}
+        for log in vis_logs:
+            code = log.person_id
+            if code not in by_code:
+                by_code[code] = []
+            by_code[code].append(log)
+
+        reconstructed = 0
+        for code, logs in by_code.items():
+            existing = db.query(VisitorModel).filter(VisitorModel.visitor_code == code).first()
+            if not existing:
+                parts = code.split('-')
+                date_key = parts[1] if len(parts) >= 2 else '20260807'
+                sorted_logs = sorted(logs, key=lambda l: l.timestamp or datetime.now())
+                first_log, last_log = sorted_logs[0], sorted_logs[-1]
+
+                snap_path = None
+                for l in reversed(sorted_logs):
+                    if l.face_snapshot_path and os.path.exists(l.face_snapshot_path):
+                        snap_path = l.face_snapshot_path
+                        break
+
+                v_dir, _, _ = get_visitor_folder_paths(date_key, code)
+                dest_avatar = v_dir / 'primary_avatar.jpg'
+
+                if snap_path:
+                    try:
+                        shutil.copy2(snap_path, str(dest_avatar))
+                        primary_path = str(dest_avatar)
+                    except Exception:
+                        primary_path = snap_path
+                else:
+                    primary_path = None
+
+                visitor = VisitorModel(
+                    visitor_code=code,
+                    date_key=date_key,
+                    first_seen_at=first_log.timestamp or datetime.now(),
+                    last_seen_at=last_log.timestamp or datetime.now(),
+                    first_camera_id=first_log.camera_id or 'default',
+                    last_camera_id=last_log.camera_id or 'default',
+                    sighting_count=len(logs),
+                    primary_snapshot_path=primary_path,
+                    status='active'
+                )
+                db.add(visitor)
+                db.flush()
+
+                sighting = VisitorSightingModel(
+                    visitor_id=visitor.id,
+                    camera_id=last_log.camera_id or 'default',
+                    track_id=str(last_log.track_id or '1'),
+                    entered_at=first_log.timestamp or datetime.now(),
+                    last_seen_at=last_log.timestamp or datetime.now(),
+                    best_similarity=last_log.similarity or 1.0,
+                    second_best_similarity=0.0,
+                    match_margin=1.0,
+                    identity_confidence=1.0,
+                    snapshot_path=primary_path
+                )
+                db.add(sighting)
+                reconstructed += 1
+
+        if reconstructed > 0:
+            db.commit()
+            logger.info(f"Reconstructed {reconstructed} missing visitor profiles from recognition logs.")
+
+        # Step 2: Ensure all primary_snapshot_path entries are populated and point to valid files
+        visitors = db.query(VisitorModel).all()
+        repaired = 0
+        for v in visitors:
+            if not v.primary_snapshot_path or not os.path.exists(v.primary_snapshot_path):
+                img_source = None
+
+                sighting = db.query(VisitorSightingModel).filter(
+                    VisitorSightingModel.visitor_id == v.id,
+                    VisitorSightingModel.snapshot_path.isnot(None)
+                ).order_by(VisitorSightingModel.id.desc()).first()
+                if sighting and sighting.snapshot_path and os.path.exists(sighting.snapshot_path):
+                    img_source = sighting.snapshot_path
+
+                if not img_source:
+                    sample = db.query(VisitorFaceSampleModel).filter(
+                        VisitorFaceSampleModel.visitor_id == v.id,
+                        VisitorFaceSampleModel.snapshot_path.isnot(None)
+                    ).order_by(VisitorFaceSampleModel.id.desc()).first()
+                    if sample and sample.snapshot_path and os.path.exists(sample.snapshot_path):
+                        img_source = sample.snapshot_path
+
+                if not img_source:
+                    log = db.query(RecognitionLogModel).filter(
+                        RecognitionLogModel.person_id == v.visitor_code,
+                        RecognitionLogModel.face_snapshot_path.isnot(None)
+                    ).order_by(RecognitionLogModel.id.desc()).first()
+                    if log and log.face_snapshot_path and os.path.exists(log.face_snapshot_path):
+                        img_source = log.face_snapshot_path
+
+                if img_source:
+                    v_dir, _, _ = get_visitor_folder_paths(v.date_key, v.visitor_code)
+                    dest_path = v_dir / 'primary_avatar.jpg'
+                    shutil.copy2(img_source, str(dest_path))
+                    v.primary_snapshot_path = str(dest_path)
+                    repaired += 1
+
+        if repaired > 0:
+            db.commit()
+            logger.info(f"Self-healed primary avatars for {repaired} visitor profile(s).")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error during visitor avatar self-healing: {e}")
+    finally:
+        db.close()
+
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing Database Tables...")
@@ -102,11 +241,22 @@ async def lifespan(app: FastAPI):
     except Exception as logo_err:
         logger.error(f"Failed to copy logo: {logo_err}")
 
-    # Run self-healing database prune to clean manually deleted files
+    # Run self-healing database prune to clean manually deleted files & contaminated visitor galleries
     try:
         prune_database_orphans()
+        self_heal_visitor_avatars()
+        from app.visitors.visitor_repository import visitor_repository
+        from app.core.database import SessionLocal
+        db_heal = SessionLocal()
+        try:
+            visitor_repository.self_heal_and_migrate_visitor_paths(db_heal)
+            visitor_repository.purge_visitor_gallery_contamination(db_heal)
+        finally:
+            db_heal.close()
     except Exception as cleanup_err:
         logger.error(f"Failed to complete database pruning on startup: {cleanup_err}")
+
+
 
     # Synchronize camera registry DB table
     try:
@@ -165,11 +315,46 @@ async def lifespan(app: FastAPI):
             "Skipping legacy camera_manager to avoid dual RTSP capture."
         )
 
+    # Start Presence Duration Session Sweeper background thread
+    presence_sweeper_active = True
+    def _presence_sweeper_loop():
+        from app.services.presence_service import presence_service
+        from app.core.database import SessionLocal
+        while presence_sweeper_active:
+            try:
+                db_sub = SessionLocal()
+                try:
+                    presence_service.sweep_expired_sessions(db_sub)
+                    presence_service.split_midnight_sessions(db_sub)
+                finally:
+                    db_sub.close()
+            except Exception as sweep_err:
+                logger.error(f"Presence sweeper error: {sweep_err}")
+            time.sleep(5)
+
+    presence_thread = threading.Thread(target=_presence_sweeper_loop, daemon=True, name="PresenceSweeper")
+    presence_thread.start()
+    logger.info("Presence Session Sweeper background thread started.")
+
     logger.info(f"Enterprise Face Recognition Backend started. {cameras_started} camera pipeline(s) active.")
     yield
 
     logger.info("Shutting down application...")
+    presence_sweeper_active = False
+    try:
+        from app.services.presence_service import presence_service
+        from app.core.database import SessionLocal
+        db_shut = SessionLocal()
+        try:
+            presence_service.close_all_sessions_on_shutdown(db_shut)
+        finally:
+            db_shut.close()
+        logger.info("Closed active presence sessions for server shutdown.")
+    except Exception as pres_err:
+        logger.error(f"Error closing presence sessions on shutdown: {pres_err}")
+
     # Stop all camera workers
+
     try:
         from app.services.camera.camera_registry import camera_registry
         with camera_registry.lock:
@@ -221,16 +406,17 @@ app.include_router(person_gallery_router)
 app.include_router(history_router)
 app.include_router(browser_camera_router)
 app.include_router(reports_router)
+app.include_router(visitors_router)
 
 # Serve Plugin Routers
 from app.projects.manager import plugin_manager
 for proj_router in plugin_manager.get_project_routers():
     app.include_router(proj_router)
 
-# Serve storage/faces folder as static mount for frontend access to face sample thumbnails
-faces_dir = settings.FACES_DIR
-if faces_dir.exists():
-    app.mount("/faces", StaticFiles(directory=str(faces_dir)), name="faces")
+# Serve storage/visitors folder for visitor face crops & primary snapshots
+visitors_dir = settings.STORAGE_DIR / "visitors"
+os.makedirs(visitors_dir, exist_ok=True)
+app.mount("/faces/visitors", StaticFiles(directory=str(visitors_dir)), name="visitor_faces")
 
 # Serve storage/candidates folder for candidate snapshots
 candidates_dir = settings.STORAGE_DIR / "candidates"
@@ -241,6 +427,11 @@ app.mount("/faces/candidates", StaticFiles(directory=str(candidates_dir)), name=
 snapshots_dir = settings.STORAGE_DIR / "snapshots"
 os.makedirs(snapshots_dir, exist_ok=True)
 app.mount("/faces/snapshots", StaticFiles(directory=str(snapshots_dir)), name="snapshot_faces")
+
+# Serve storage/faces folder as static mount for frontend access to registered face sample thumbnails
+faces_dir = settings.FACES_DIR
+if faces_dir.exists():
+    app.mount("/faces", StaticFiles(directory=str(faces_dir)), name="faces")
 
 # Serve Frontend Web Application (with SPA fallback support)
 from app.config import BASE_DIR

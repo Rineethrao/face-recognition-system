@@ -5,11 +5,22 @@
 
 export function parseUtcTimestamp(utcString: string): Date | null {
   if (!utcString) return null
-  const iso =
-    utcString.includes('T') || /[zZ]|[+-]\d{2}:?\d{2}$/.test(utcString)
-      ? utcString
-      : utcString.replace(' ', 'T') + 'Z'
-  const date = new Date(iso)
+
+  // Support DD-MM-YYYY HH:MM:SS format
+  if (/^\d{2}-\d{2}-\d{4}/.test(utcString)) {
+    const parts = utcString.split(' ')
+    const dateParts = parts[0].split('-')
+    const day = dateParts[0]
+    const month = dateParts[1]
+    const year = dateParts[2]
+    const timePart = parts[1] || '00:00:00'
+    const isoString = `${year}-${month}-${day}T${timePart}`
+    const d = new Date(isoString)
+    if (!isNaN(d.getTime())) return d
+  }
+
+  const formatted = utcString.includes('T') ? utcString : utcString.replace(' ', 'T')
+  const date = new Date(formatted)
   if (!isNaN(date.getTime())) return date
   const fallback = new Date(utcString)
   return isNaN(fallback.getTime()) ? null : fallback
@@ -19,14 +30,21 @@ function pad(n: number): string {
   return String(n).padStart(2, '0')
 }
 
-/** Local system date+time: YYYY-MM-DD HH:mm:ss */
+/** Local system date+time: DD-MM-YYYY HH:mm:ss */
 export function formatLocalDateTime(utcString: string): string {
   const date = parseUtcTimestamp(utcString)
   if (!date) return utcString || ''
   return (
-    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getDate())}-${pad(date.getMonth() + 1)}-${date.getFullYear()} ` +
     `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
   )
+}
+
+/** Local system date only: DD-MM-YYYY */
+export function formatLocalDateOnly(utcString: string): string {
+  const date = parseUtcTimestamp(utcString)
+  if (!date) return utcString || ''
+  return `${pad(date.getDate())}-${pad(date.getMonth() + 1)}-${date.getFullYear()}`
 }
 
 /** Local system time only: HH:mm:ss */

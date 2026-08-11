@@ -38,7 +38,12 @@ class DetectionService:
             return list(self.recent_face_crops.values())
 
     def get_latest_annotated_frame(self) -> Tuple[bool, Optional[np.ndarray]]:
+        with self.lock:
+            if self.latest_annotated_frame is None:
+                return False, None
+            return True, self.latest_annotated_frame.copy()
 
+    def get_latest_frame(self) -> Tuple[bool, Optional[np.ndarray]]:
         with self.lock:
             if self.latest_annotated_frame is None:
                 return False, None
@@ -139,14 +144,21 @@ class DetectionService:
                         match = match_map.get(track_id)
                         if match:
                             if match.person_id == "unknown":
-                                color = (0, 0, 255)  # Red for Unknown
-                                text = f"ID:{track_id} | Unknown"
+                                if match.name and match.name != "Unknown":
+                                    color = (255, 180, 0)  # Amber for Identifying...
+                                    text = f"ID:{track_id} | {match.name}"
+                                else:
+                                    color = (0, 165, 255)  # Orange for Analyzing
+                                    text = f"ID:{track_id} | Identifying..."
+                            elif match.person_id.startswith("VISITOR-"):
+                                color = (255, 215, 0)  # Cyan/Gold for Global Visitor
+                                text = f"ID:{track_id} | {match.person_id}"
                             else:
-                                color = (0, 255, 0)  # Green for recognized person
+                                color = (0, 255, 0)  # Green for Registered Person
                                 text = f"ID:{track_id} | {match.name} ({int(match.similarity * 100)}%)"
                         else:
-                            color = (0, 255, 255)  # Yellow for tracking/unrecognized
-                            text = f"ID:{track_id} | Analyzing..."
+                            color = (0, 165, 255)
+                            text = f"ID:{track_id} | Identifying..."
 
                         cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
 
@@ -182,6 +194,18 @@ class DetectionService:
         try:
             # Cast track_id to string for DB compatibility (RecognitionLogModel.track_id is String)
             str_track_id = str(match.track_id)
+
+            # Always update presence tracking for detected person
+            try:
+                from app.services.presence_service import presence_service
+                presence_service.on_person_detected(
+                    db=db,
+                    person_id=match.person_id,
+                    person_name=match.name,
+                    camera_id=getattr(match, 'camera_id', 'default')
+                )
+            except Exception:
+                pass
 
             existing_recent = db.query(RecognitionLogModel).filter(
                 RecognitionLogModel.track_id == str_track_id,

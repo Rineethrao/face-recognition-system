@@ -27,7 +27,7 @@ def _parse_range(start_date: Optional[str], end_date: Optional[str]):
     if end_date:
         end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
     else:
-        end_dt = datetime.utcnow() + timedelta(days=1)
+        end_dt = datetime.now() + timedelta(days=1)
 
     if start_date:
         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
@@ -92,7 +92,7 @@ def get_report_summary(
             status="success",
             message="Report summary generated.",
             data={
-                "range": {"start": start_dt.strftime("%Y-%m-%d"), "end": (end_dt - timedelta(days=1)).strftime("%Y-%m-%d")},
+                "range": {"start": start_dt.strftime("%d-%m-%Y"), "end": (end_dt - timedelta(days=1)).strftime("%d-%m-%Y")},
                 "total_events": total_events,
                 "known_events": len(known_events),
                 "unknown_events": unknown_events,
@@ -131,7 +131,7 @@ def export_csv(
                 f"{(l.similarity or 0):.4f}",
                 l.camera_id or "default",
                 l.track_id,
-                l.timestamp.strftime("%Y-%m-%d %H:%M:%S") if l.timestamp else "",
+                l.timestamp.strftime("%d-%m-%Y %H:%M:%S") if l.timestamp else "",
             ])
         buffer.seek(0)
 
@@ -248,3 +248,49 @@ def export_pdf(
         )
     finally:
         db.close()
+
+
+@router.get("/daily", response_model=APIResponse)
+def get_daily_presence_report(
+    date: Optional[str] = Query(None, description="YYYY-MM-DD date filter"),
+    person_id: Optional[str] = Query(None),
+):
+    """
+    Returns daily person presence duration report records with live duration calculation.
+    """
+    date_str = date or datetime.now().strftime("%Y-%m-%d")
+    db = SessionLocal()
+    try:
+        from app.models.presence_models import DailyReportModel
+        from app.services.presence_service import presence_service
+
+        query = db.query(DailyReportModel).filter(DailyReportModel.report_date == date_str)
+        if person_id:
+            query = query.filter(DailyReportModel.person_id == person_id)
+
+        reports = query.order_by(DailyReportModel.updated_at.desc()).all()
+
+        data = []
+        for r in reports:
+            live = presence_service.get_live_presence(db, r.person_id, date_str)
+            data.append({
+                "person_id": r.person_id,
+                "person_name": r.person_name or r.person_id,
+                "report_date": r.report_date,
+                "first_seen": live["first_seen"].strftime("%d-%m-%Y %H:%M:%S") if live["first_seen"] else "",
+                "last_seen": live["last_seen"].strftime("%d-%m-%Y %H:%M:%S") if live["last_seen"] else "",
+                "total_duration_seconds": live["total_duration_seconds"],
+                "total_duration": live["total_duration"],
+                "visit_count": live["visit_count"],
+                "is_currently_present": live["is_currently_present"],
+                "status": live["status"]
+            })
+
+        return APIResponse(
+            status="success",
+            message=f"Retrieved {len(data)} daily presence report records for {date_str}.",
+            data=data
+        )
+    finally:
+        db.close()
+

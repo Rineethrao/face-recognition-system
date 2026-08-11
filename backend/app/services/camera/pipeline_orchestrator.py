@@ -225,30 +225,6 @@ class PipelineOrchestrator:
                 for item in overlay_data:
                     self._draw_overlay(annotated, item)
 
-            # Subtle registration banner only (no face/person boxes on the stream)
-            try:
-                from app.services.registration.registration_engine import registration_engine
-                from app.services.registration.gallery_service import gallery_service
-                if registration_engine.is_registering and (
-                    registration_engine.locked_camera_id in (None, self.camera_id)
-                    or registration_engine.capture_method == "CCTV"
-                ):
-                    if annotated is frame:
-                        annotated = frame.copy()
-                    collected = len(gallery_service.samples)
-                    target_n = registration_engine.target_samples
-                    state = registration_engine.target_state
-                    if state in ("WAITING_FOR_SELECTION", "WAITING_FOR_TARGET"):
-                        overlay_text = "REGISTRATION: Click a face to begin"
-                    elif state in ("TARGET_LOST", "TARGET_TEMPORARILY_LOST"):
-                        overlay_text = "REGISTRATION: Target temporarily lost"
-                    else:
-                        overlay_text = f"REGISTRATION: Capturing {collected}/{target_n}"
-                    cv2.rectangle(annotated, (0, 0), (annotated.shape[1], 36), (30, 90, 200), -1)
-                    cv2.putText(annotated, overlay_text, (15, 24),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
-            except Exception:
-                pass
 
             # ── JPEG encode ───────────────────────────────────────────────────
             encode_start = time.monotonic()
@@ -351,39 +327,32 @@ class PipelineOrchestrator:
                         state.current_bbox = face.bbox
                         state.current_landmarks = face.landmarks
 
-                        # ── Best frame selection ──────────────────────────────
-                        if not state.recognition_attempted and (
-                            state.frames_collected < 10 and (now - state.first_seen) < 1.0
-                        ):
+                        # ── Continuous best frame selection for unresolved tracks ─────────
+                        if not state.recognition_attempted:
                             x1, y1, x2, y2 = face.bbox
                             face_size = min(max(0, x2 - x1), max(0, y2 - y1))
 
-                            ih, iw = frame.shape[:2]
-                            cx1 = int(max(0, x1)); cy1 = int(max(0, y1))
-                            cx2 = int(min(iw, x2)); cy2 = int(min(ih, y2))
-                            if cx2 > cx1 and cy2 > cy1:
-                                crop = frame[cy1:cy2, cx1:cx2]
-                                gray_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                                blur = float(cv2.Laplacian(gray_crop, cv2.CV_64F).var())
-                            else:
-                                blur = 0.0
+                            # Face size gate: minimum 22px (allows distant CCTV office faces)
+                            if face_size >= getattr(settings, 'VISITOR_MIN_FACE_WIDTH', 22):
+                                ih, iw = frame.shape[:2]
+                                cx1 = int(max(0, x1)); cy1 = int(max(0, y1))
+                                cx2 = int(min(iw, x2)); cy2 = int(min(ih, y2))
+                                if cx2 > cx1 and cy2 > cy1:
+                                    crop = frame[cy1:cy2, cx1:cx2]
+                                    gray_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                                    blur = float(cv2.Laplacian(gray_crop, cv2.CV_64F).var())
+                                else:
+                                    blur = 0.0
 
-                            quality_est = face_size * blur
-                            if quality_est > state.best_quality_est:
-                                state.best_quality_est = quality_est
-                                state.best_frame = frame.copy()
-                                state.best_landmarks = np.array(face.landmarks)
-                                state.best_bbox = face.bbox
+                                quality_est = face_size * blur
+                                if quality_est > state.best_quality_est or state.best_frame is None:
+                                    state.best_quality_est = quality_est
+                                    state.best_frame = frame.copy()
+                                    state.best_landmarks = np.array(face.landmarks)
+                                    state.best_bbox = face.bbox
+                                    new_unrecognized = True
 
-                            state.frames_collected += 1
-
-                        # Check if recognition window has closed
-                        window_closed = (
-                            state.frames_collected >= 10 or
-                            (now - state.first_seen) >= 1.0
-                        )
-                        if window_closed and not state.recognition_attempted:
-                            new_unrecognized = True
+                                state.frames_collected += 1
 
                     # Cleanup stale tracks (gone > 30 seconds)
                     stale = [tid for tid, s in self._track_states.items()
@@ -452,6 +421,7 @@ class PipelineOrchestrator:
                             "track_id": tid,  # internal pipeline continuity only
                             "detection_id": f"{self.camera_id}_face_{tid}",
                             "bbox": bbox,
+                            "match": final_match,
                             "blur_score": round(blur, 1),
                             "crop_base64": crop_base64,
                             "is_recognized": is_recognized,
@@ -547,18 +517,15 @@ class PipelineOrchestrator:
                 for tid, state in self._track_states.items():
                     if state.recognition_attempted:
                         continue
-                    window_closed = (
-                        state.frames_collected >= 10 or
-                        (now - state.first_seen) >= 1.0
-                    )
-                    if window_closed and state.best_frame is not None:
-                        state.recognition_attempted = True  # Lock immediately to prevent double-processing
+                    if state.best_frame is not None:
                         candidates.append((tid, state.best_frame, state.best_bbox, state.best_landmarks))
+                        state.best_frame = None  # Reset best frame so next observation can be picked up
+                        state.best_quality_est = 0.0
 
             for tid, best_frame, best_box, best_lms in candidates:
                 try:
                     match_info = self._run_recognition(
-                        best_frame, best_box, best_lms,
+                        tid, best_frame, best_box, best_lms,
                         arcface_recognizer, faiss_manager, l2_normalize, align_face
                     )
 
@@ -566,95 +533,163 @@ class PipelineOrchestrator:
                         state = self._track_states.get(tid)
                         if state:
                             state.final_match = match_info
+                            # Lock sticky ONLY when identity is resolved (Registered or Visitor)
+                            if match_info.get("status") in ("RECOGNIZED", "VISITOR"):
+                                state.recognition_attempted = True
+                            else:
+                                state.recognition_attempted = False
 
-                    # Log recognition event
-                    self._log_event(tid, match_info)
+                    # Log recognition event if identity is resolved
+                    if match_info.get("status") in ("RECOGNIZED", "VISITOR"):
+                        self._log_event(tid, match_info)
 
                 except Exception as e:
                     logger.error(f"[Recognition:{self.camera_id}] Track {tid} error: {e}", exc_info=True)
                     with self._track_lock:
                         state = self._track_states.get(tid)
                         if state:
-                            state.final_match = {"person_id": "unknown", "name": "Unknown", "similarity": 0.0}
+                            state.final_match = {"person_id": "unknown", "name": "Identifying...", "similarity": 0.0}
 
-    def _run_recognition(self, frame, bbox, landmarks, arcface, faiss_mgr, l2_normalize_fn, align_fn) -> Dict[str, Any]:
-        """Quality gate → ArcFace embedding → FAISS search."""
-        from app.services.quality.quality_engine import quality_engine
+    def _run_recognition(self, track_id, frame, bbox, landmarks, arcface, faiss_mgr, l2_normalize_fn, align_fn) -> Dict[str, Any]:
+        """Quality gate → ArcFace embedding → FAISS registered search (if active) → VisitorManager."""
+        t0 = time.perf_counter()
+        from app.visitors.face_quality import visitor_quality_evaluator
 
-        # Full quality evaluation
-        eval_res = quality_engine.evaluate(frame, bbox, landmarks)
-        quality_score = eval_res.get("quality_score", 0.0) * 100.0
+        # Multi-Tier Face Quality Evaluation
+        quality_res = visitor_quality_evaluator.evaluate_quality(frame, bbox, landmarks)
 
-        if quality_score < 55.0:
-            logger.debug(f"[Recognition:{self.camera_id}] Quality too low: {quality_score:.1f}")
-            return {"person_id": "unknown", "name": "Unknown", "similarity": 0.0}
+        # POOR face quality check: If unusable for matching, DO NOT proceed to recognition!
+        if not quality_res.usable_for_matching:
+            logger.debug(f"[Recognition:{self.camera_id}] Quality tier {quality_res.quality_tier} unusable for matching on track {track_id}")
+            return {"person_id": "unknown", "name": "Identifying...", "similarity": 0.0, "status": "IDENTIFYING"}
 
-        aligned_crop = eval_res.get("aligned_crop")
+        aligned_crop = quality_res.aligned_crop
         if aligned_crop is None:
-            return {"person_id": "unknown", "name": "Unknown", "similarity": 0.0}
+            return {"person_id": "unknown", "name": "Identifying...", "similarity": 0.0, "status": "IDENTIFYING"}
 
         # ArcFace embedding
         embedding = arcface.extract_embedding(aligned_crop)
         if embedding is None:
-            return {"person_id": "unknown", "name": "Unknown", "similarity": 0.0}
+            return {"person_id": "unknown", "name": "Identifying...", "similarity": 0.0, "status": "IDENTIFYING"}
 
-        # FAISS search
-        if faiss_mgr.index.ntotal == 0:
-            return {"person_id": "unknown", "name": "Unknown", "similarity": 0.0}
-
-        top_k_hits = faiss_mgr.search(query_embedding=embedding, k=10, threshold=0.35)
-        if not top_k_hits:
-            return {"person_id": "unknown", "name": "Unknown", "similarity": 0.0}
-
-        q_norm = l2_normalize_fn(embedding)
+        # 1. Registered Person Search (Shortcut: Skip FAISS search completely if registered gallery is empty!)
         best_pid = None
         best_name = "Unknown"
         best_sim = 0.0
 
-        for hit in top_k_hits:
-            pid = hit["person_id"]
-            name = hit["name"]
-            cached_embs = faiss_mgr.embeddings_cache.get(pid, [])
-            if not cached_embs:
-                continue
-            sims = [float(np.dot(q_norm, l2_normalize_fn(e))) for e in cached_embs]
-            max_sim = max(sims)
-            if max_sim > best_sim:
-                best_sim = max_sim
-                best_pid = pid
-                best_name = name
+        if faiss_mgr.index.ntotal > 0:
+            top_k_hits = faiss_mgr.search(query_embedding=embedding, k=10, threshold=0.35)
+            q_norm = l2_normalize_fn(embedding)
 
-        threshold = settings.RECOGNITION_SIMILARITY_THRESHOLD
-        if best_pid and best_sim >= threshold:
-            # Trigger progressive learning
+            for hit in top_k_hits:
+                pid = hit["person_id"]
+                name = hit["name"]
+                cached_embs = faiss_mgr.embeddings_cache.get(pid, [])
+                if not cached_embs:
+                    continue
+                sims = [float(np.dot(q_norm, l2_normalize_fn(e))) for e in cached_embs]
+                max_sim = max(sims)
+                if max_sim > best_sim:
+                    best_sim = max_sim
+                    best_pid = pid
+                    best_name = name
+
+            threshold = getattr(settings, 'REGISTERED_CONFIRMED_THRESHOLD', getattr(settings, 'VISITOR_REGISTERED_MATCH_THRESHOLD', 0.40))
+            if best_pid and best_sim >= threshold:
+                try:
+                    from app.services.learning.progressive_learning import progressive_learning_engine
+                    progressive_learning_engine.queue_profile_auto_improvement(
+                        person_id=best_pid, name=best_name, aligned_crop=aligned_crop,
+                        new_embedding=embedding, match_score=best_sim, camera_id=self.camera_id
+                    )
+                except Exception:
+                    pass
+                t_tot = (time.perf_counter() - t0) * 1000.0
+                logger.info(f"[Perf:{self.camera_id}] Track {track_id} matched REGISTERED {best_name} ({best_sim*100:.1f}%) in {t_tot:.1f}ms")
+                return {
+                    "person_id": best_pid,
+                    "name": best_name,
+                    "similarity": round(best_sim, 4),
+                    "status": "RECOGNIZED",
+                    "aligned_crop": aligned_crop,
+                    "quality_score": quality_res.quality_score
+                }
+
+        # Registered recognition returned no match -> Route to VisitorManager
+        try:
+            from app.core.database import SessionLocal
+            from app.visitors.visitor_manager import visitor_manager
+            db = SessionLocal()
             try:
-                from app.services.learning.progressive_learning import progressive_learning_engine
-                progressive_learning_engine.queue_profile_auto_improvement(
-                    person_id=best_pid, name=best_name, aligned_crop=aligned_crop,
-                    new_embedding=embedding, match_score=best_sim, camera_id=self.camera_id
+                vis_res = visitor_manager.resolve_unregistered_track(
+                    db=db,
+                    camera_id=self.camera_id,
+                    track_id=track_id,
+                    embedding=embedding,
+                    quality_res=quality_res,
+                    crop_img=aligned_crop
                 )
-            except Exception:
-                pass
-            return {"person_id": best_pid, "name": best_name, "similarity": round(best_sim, 4), "status": "RECOGNIZED"}
+                if vis_res.is_resolved:
+                    return {
+                        "person_id": vis_res.visitor_code,
+                        "name": vis_res.visitor_code,
+                        "similarity": vis_res.similarity,
+                        "status": "VISITOR",
+                        "aligned_crop": aligned_crop,
+                        "quality_score": quality_res.quality_score
+                    }
+                else:
+                    return {
+                        "person_id": "unknown",
+                        "name": vis_res.visitor_code,
+                        "similarity": 0.0,
+                        "status": "IDENTIFYING",
+                        "aligned_crop": aligned_crop,
+                        "quality_score": quality_res.quality_score
+                    }
+            finally:
+                db.close()
+        except Exception as vis_err:
+            logger.error(f"[Recognition:{self.camera_id}] Visitor resolution error: {vis_err}")
 
-        elif best_pid and best_sim >= 0.35:
-            return {"person_id": best_pid, "name": best_name, "similarity": round(best_sim, 4), "status": "POSSIBLE_MATCH"}
-
-        return {"person_id": "unknown", "name": "Unknown", "similarity": round(best_sim, 4), "status": "UNKNOWN"}
+        return {
+            "person_id": "unknown",
+            "name": "Identifying...",
+            "similarity": round(best_sim, 4),
+            "status": "UNKNOWN",
+            "aligned_crop": aligned_crop,
+            "quality_score": quality_res.quality_score
+        }
 
     def _log_event(self, track_id: int, match_info: Dict[str, Any]):
         """Log a recognition event to the database (non-blocking)."""
         if match_info.get("person_id") == "unknown":
             return
         try:
+            from app.config import settings
             from app.core.database import get_db
             from app.models.db_models import RecognitionLogModel
             from app.models.schemas import RecognitionEvent
+            from app.services.presence_service import presence_service
+            import os
             import time as _time
+            import cv2
 
             db = next(get_db())
             try:
                 str_tid = str(track_id)
+
+                # Always record presence detection & update duration tracking for registered persons
+                try:
+                    presence_service.on_person_detected(
+                        db=db,
+                        person_id=match_info["person_id"],
+                        person_name=match_info["name"],
+                        camera_id=self.camera_id
+                    )
+                except Exception as pres_err:
+                    logger.warning(f"Presence tracking error on camera {self.camera_id}: {pres_err}")
+
                 existing = db.query(RecognitionLogModel).filter(
                     RecognitionLogModel.track_id == str_tid,
                     RecognitionLogModel.person_id == match_info["person_id"]
@@ -665,16 +700,31 @@ class PipelineOrchestrator:
                     if diff < 5.0:
                         return
 
+                # Save face snapshot crop to disk
+                snapshot_path = None
+                crop = match_info.get("aligned_crop")
+                if crop is not None and crop.size > 0:
+                    snapshots_dir = settings.STORAGE_DIR / "snapshots"
+                    os.makedirs(snapshots_dir, exist_ok=True)
+                    snap_filename = f"snap_{match_info['person_id']}_{int(_time.time())}_{track_id}.jpg"
+                    full_path = snapshots_dir / snap_filename
+                    cv2.imwrite(str(full_path), crop)
+                    snapshot_path = str(full_path)
+
                 log_entry = RecognitionLogModel(
                     person_id=match_info["person_id"],
                     name=match_info["name"],
                     similarity=match_info["similarity"],
                     track_id=str_tid,
                     camera_id=self.camera_id,
+                    quality_score=match_info.get("quality_score", 0.0),
+                    face_snapshot_path=snapshot_path
                 )
                 db.add(log_entry)
                 db.commit()
                 db.refresh(log_entry)
+
+                snap_url = f"/faces/snapshots/{os.path.basename(snapshot_path)}" if snapshot_path else None
 
                 event = RecognitionEvent(
                     id=log_entry.id,
@@ -684,8 +734,9 @@ class PipelineOrchestrator:
                     track_id=str_tid,
                     camera_id=self.camera_id,
                     embedding_version=1,
-                    quality_score=0.0,
-                    recognized_at=log_entry.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+                    quality_score=match_info.get("quality_score", 0.0),
+                    recognized_at=log_entry.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    face_snapshot_url=snap_url
                 )
 
                 # Dispatch to plugin system
@@ -697,12 +748,13 @@ class PipelineOrchestrator:
 
                 logger.info(
                     f"[RECOGNIZED] {match_info['name']} ({match_info['person_id']}) "
-                    f"| Sim: {match_info['similarity']:.2f} | Track: {track_id} | Cam: {self.camera_id}"
+                    f"| Sim: {match_info['similarity']:.2f} | Track: {track_id} | Cam: {self.camera_id} | Snapshot: {snapshot_path}"
                 )
             finally:
                 db.close()
         except Exception as e:
             logger.error(f"[Pipeline:{self.camera_id}] DB log error: {e}")
+
 
     def reset_track_recognitions(self):
         """Resets recognition status on all active tracks so they are immediately re-evaluated against updated FAISS index."""
@@ -750,18 +802,30 @@ class PipelineOrchestrator:
                 line1 = name
                 line2 = f"{sim_pct}%"
                 text_color = (0, 0, 0)
+            elif status == "VISITOR" or (isinstance(name, str) and name.startswith("VISITOR-")):
+                # 3. Visitor Re-ID: CYAN / GOLD (BGR: 255, 200, 0)
+                color = (255, 200, 0)
+                line1 = name
+                line2 = "Visitor"
+                text_color = (0, 0, 0)
+            elif status in ("IDENTIFYING", "ANALYZING") or name in ("Analyzing...", "Identifying..."):
+                # 4. Collecting / Identifying: AMBER (BGR: 0, 215, 255)
+                color = (0, 215, 255)
+                line1 = "Identifying..."
+                line2 = ""
+                text_color = (0, 0, 0)
             elif status == "POSSIBLE_MATCH":
-                # 3. Low Confidence Possible Match: ORANGE (BGR: 0, 140, 255)
+                # 5. Low Confidence Possible Match: ORANGE (BGR: 0, 140, 255)
                 color = (0, 140, 255)
                 line1 = "Possible Match"
                 line2 = f"{name} ({sim_pct}%)"
                 text_color = (0, 0, 0)
             else:
-                # 4. Non-Registered Unknown: RED (BGR: 0, 0, 255)
-                color = (0, 0, 255)
-                line1 = "Unknown"
+                # 6. Fallback: AMBER (BGR: 0, 165, 255)
+                color = (0, 165, 255)
+                line1 = name if name != "Unknown" else "Identifying..."
                 line2 = ""
-                text_color = (255, 255, 255)
+                text_color = (0, 0, 0)
 
         # Draw main bounding box (thickness = 2)
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)

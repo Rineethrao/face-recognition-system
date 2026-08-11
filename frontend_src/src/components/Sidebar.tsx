@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router-dom'
 import {
-  LayoutDashboard, Video, Camera, Users, UserPlus,
+  LayoutDashboard, Video, Camera, Users, UserPlus, Eye,
   Bell, BarChart2, Settings, ChevronLeft, Shield, Radio, Sparkles
 } from 'lucide-react'
 import { useStore } from '../store/useStore'
@@ -35,6 +35,7 @@ const navGroups: NavGroup[] = [
     groupName: 'People',
     items: [
       { to: '/persons', icon: Users, label: 'Registered Persons' },
+      { to: '/visitors', icon: Eye, label: 'Visitor Tracking' },
       { to: '/register', icon: UserPlus, label: 'Register Person', featured: true },
     ],
   },

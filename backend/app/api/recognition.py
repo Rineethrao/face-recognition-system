@@ -58,18 +58,143 @@ def stop_recognition():
         data={"is_recognizing": False}
     )
 
+def apply_recognition_log_filters(query, date_key: Optional[str] = None, category: Optional[str] = None):
+    from sqlalchemy import func
+    if hasattr(date_key, "default"):
+        date_key = date_key.default
+    if hasattr(category, "default"):
+        category = category.default
+
+    if isinstance(date_key, str) and date_key and date_key.lower() != "all":
+        clean_key = date_key.strip()
+        if "-" in clean_key:
+            key_dash = clean_key
+            key_nodash = clean_key.replace("-", "")
+        else:
+            key_nodash = clean_key
+            key_dash = f"{clean_key[:4]}-{clean_key[4:6]}-{clean_key[6:8]}" if len(clean_key) == 8 and clean_key.isdigit() else clean_key
+
+        query = query.filter(
+            (func.strftime("%Y-%m-%d", RecognitionLogModel.timestamp) == key_dash) |
+            (func.strftime("%Y%m%d", RecognitionLogModel.timestamp) == key_nodash)
+        )
+
+    if isinstance(category, str) and category and category.lower() != "all":
+        cat = category.lower().strip()
+        if cat in ["registered", "person", "persons"]:
+            query = query.filter(
+                ~RecognitionLogModel.person_id.like("VISITOR%"),
+                RecognitionLogModel.person_id != "unknown"
+            )
+        elif cat in ["visitor", "visitors"]:
+            query = query.filter(RecognitionLogModel.person_id.like("VISITOR%"))
+        elif cat in ["unknown", "unregistered"]:
+            query = query.filter(RecognitionLogModel.person_id == "unknown")
+
+    return query
+
+
+
+@router.get("/recognitions/dates", response_model=APIResponse)
+def get_recognition_dates(db: Session = Depends(get_db)):
+    """Returns available operational dates with recognition counts per date."""
+    from sqlalchemy import func
+    from datetime import datetime
+
+    today_dash = datetime.now().strftime("%Y-%m-%d")
+
+    rows = db.query(
+        func.strftime("%Y-%m-%d", RecognitionLogModel.timestamp).label("date_key"),
+        func.count(RecognitionLogModel.id).label("count")
+    ).group_by(
+        func.strftime("%Y-%m-%d", RecognitionLogModel.timestamp)
+    ).all()
+
+    items = []
+    seen_dates = set()
+    for row in rows:
+        if not row.date_key:
+            continue
+        seen_dates.add(row.date_key)
+        try:
+            dt = datetime.strptime(row.date_key, "%Y-%m-%d")
+            formatted = dt.strftime("%d-%m-%Y")
+        except Exception:
+            formatted = row.date_key
+
+        items.append({
+            "date_key": row.date_key,
+            "date_formatted": formatted,
+            "count": int(row.count or 0),
+            "is_today": row.date_key == today_dash
+        })
+
+    if today_dash not in seen_dates:
+        items.insert(0, {
+            "date_key": today_dash,
+            "date_formatted": datetime.now().strftime("%d-%m-%Y"),
+            "count": 0,
+            "is_today": True
+        })
+
+    items.sort(key=lambda x: x["date_key"], reverse=True)
+    return APIResponse(
+        status="success",
+        message=f"Retrieved {len(items)} recognition dates.",
+        data=items
+    )
+
+
+def resolve_log_snapshot_url(log: RecognitionLogModel, db: Session) -> Optional[str]:
+    import os
+    if log.face_snapshot_path and os.path.exists(log.face_snapshot_path):
+        return f"/faces/snapshots/{os.path.basename(log.face_snapshot_path)}"
+
+    pid = log.person_id
+    if not pid or pid == "unknown":
+        return None
+
+    if pid.startswith("VISITOR"):
+        from app.visitors.models import VisitorModel
+        from app.api.visitors import resolve_visitor_primary_snapshot_url
+        v = db.query(VisitorModel).filter(VisitorModel.visitor_code == pid).first()
+        if v:
+            return resolve_visitor_primary_snapshot_url(v, db)
+
+    from app.models.db_models import PersonModel, PersonImageModel
+    p = db.query(PersonModel).filter(PersonModel.person_id == pid).first()
+    if p:
+        img = db.query(PersonImageModel).filter(PersonImageModel.person_id == pid).order_by(PersonImageModel.id.asc()).first()
+        if img and img.image_path:
+            return f"/faces/{pid}/{os.path.basename(img.image_path)}"
+        return f"/faces/{pid}/sample_1_frontal.jpg"
+
+    return None
+
+
 @router.get("/recognitions", response_model=APIResponse)
 def get_recognitions(
     limit: int = Query(default=200, ge=1, le=2000),
     person_id: Optional[str] = Query(default=None),
+    date_key: Optional[str] = Query(default=None, description="YYYY-MM-DD or 'all'"),
+    category: Optional[str] = Query(default=None, description="'all', 'registered', 'visitor', 'unknown'"),
     db: Session = Depends(get_db),
 ):
-    """Returns recognition events from persistent history (not only live buffer)."""
+    """Returns recognition events filtered by person, date, or category."""
     import os
 
+    if hasattr(person_id, "default"):
+        person_id = person_id.default
+    if hasattr(date_key, "default"):
+        date_key = date_key.default
+    if hasattr(category, "default"):
+        category = category.default
+
     query = db.query(RecognitionLogModel)
-    if person_id:
-        query = query.filter(RecognitionLogModel.person_id == person_id)
+    if isinstance(person_id, str) and person_id.strip():
+        query = query.filter(RecognitionLogModel.person_id == person_id.strip())
+
+    query = apply_recognition_log_filters(query, date_key=date_key, category=category)
 
     logs = query.order_by(RecognitionLogModel.id.desc()).limit(limit).all()
     events = [
@@ -82,12 +207,8 @@ def get_recognitions(
             "camera_id": getattr(log, "camera_id", "default") or "default",
             "embedding_version": getattr(log, "embedding_version", 1) or 1,
             "quality_score": getattr(log, "quality_score", 0.0) or 0.0,
-            "recognized_at": log.timestamp.strftime("%Y-%m-%d %H:%M:%S") if log.timestamp else "",
-            "face_snapshot_url": (
-                f"/faces/snapshots/{os.path.basename(log.face_snapshot_path)}"
-                if log.face_snapshot_path
-                else None
-            ),
+            "recognized_at": log.timestamp.strftime("%d-%m-%Y %H:%M:%S") if log.timestamp else "",
+            "face_snapshot_url": resolve_log_snapshot_url(log, db)
         }
         for log in logs
     ]
@@ -98,32 +219,44 @@ def get_recognitions(
     )
 
 
+
 @router.get("/recognitions/summary", response_model=APIResponse)
 def get_recognition_summaries(
     search: Optional[str] = Query(default=None, description="Filter by name, person_id, or camera"),
+    date_key: Optional[str] = Query(default=None, description="YYYY-MM-DD or 'all'"),
+    category: Optional[str] = Query(default=None, description="'all', 'registered', 'visitor', 'unknown'"),
     db: Session = Depends(get_db),
 ):
     """
-    Person-level recognition history summaries across ALL stored detections.
-    Used by Events grouped view so previously detected people (not only live) appear.
+    Person-level recognition history summaries filtered by date and category.
     """
     from sqlalchemy import func
 
-    # Aggregate full history per person
+    if hasattr(search, "default"):
+        search = search.default
+    if hasattr(date_key, "default"):
+        date_key = date_key.default
+    if hasattr(category, "default"):
+        category = category.default
+
+    filtered_logs = apply_recognition_log_filters(db.query(RecognitionLogModel), date_key=date_key, category=category)
+
+    filtered_subq = filtered_logs.subquery()
+
     rows = (
         db.query(
-            RecognitionLogModel.person_id,
-            func.count(RecognitionLogModel.id).label("total_count"),
-            func.avg(RecognitionLogModel.similarity).label("avg_similarity"),
-            func.max(RecognitionLogModel.id).label("last_log_id"),
-            func.min(RecognitionLogModel.id).label("first_log_id"),
+            filtered_subq.c.person_id,
+            func.count(filtered_subq.c.id).label("total_count"),
+            func.avg(filtered_subq.c.similarity).label("avg_similarity"),
+            func.max(filtered_subq.c.id).label("last_log_id"),
+            func.min(filtered_subq.c.id).label("first_log_id"),
         )
-        .group_by(RecognitionLogModel.person_id)
+        .group_by(filtered_subq.c.person_id)
         .all()
     )
 
     if not rows:
-        return APIResponse(status="success", message="No recognition history.", data=[])
+        return APIResponse(status="success", message="No recognition history for the selected filters.", data=[])
 
     last_ids = [r.last_log_id for r in rows if r.last_log_id is not None]
     first_ids = [r.first_log_id for r in rows if r.first_log_id is not None]
@@ -133,7 +266,6 @@ def get_recognition_summaries(
         for log in db.query(RecognitionLogModel).filter(RecognitionLogModel.id.in_(lookup_ids)).all()
     }
 
-    # Prefer current registered display name when available
     person_names = {
         p.person_id: p.name
         for p in db.query(PersonModel).all()
@@ -146,9 +278,13 @@ def get_recognition_summaries(
         pid = row.person_id
         name = person_names.get(pid) or (last.name if last else pid)
         camera_id = (last.camera_id if last and last.camera_id else "default")
-        last_seen = last.timestamp.strftime("%Y-%m-%d %H:%M:%S") if last and last.timestamp else ""
-        first_seen = first.timestamp.strftime("%Y-%m-%d %H:%M:%S") if first and first.timestamp else ""
+        last_seen = last.timestamp.strftime("%d-%m-%Y %H:%M:%S") if last and last.timestamp else ""
+        first_seen = first.timestamp.strftime("%d-%m-%Y %H:%M:%S") if first and first.timestamp else ""
         first_camera = (first.camera_id if first and first.camera_id else "default")
+
+        today_date_str = datetime.now().strftime("%Y-%m-%d")
+        from app.services.presence_service import presence_service
+        pres = presence_service.get_live_presence(db, pid, today_date_str)
 
         item = {
             "person_id": pid,
@@ -159,11 +295,18 @@ def get_recognition_summaries(
             "last_seen_camera": camera_id,
             "first_seen_time": first_seen,
             "first_seen_camera": first_camera,
+            "total_duration_seconds": pres["total_duration_seconds"],
+            "total_duration": pres["total_duration"],
+            "visit_count": pres["visit_count"],
+            "is_currently_present": pres["is_currently_present"],
+            "status": pres["status"],
+            "face_snapshot_url": resolve_log_snapshot_url(last, db) if last else None
         }
+
 
         if search:
             q = search.lower().strip()
-            hay = f"{item['name']} {item['person_id']} {item['last_seen_camera']} {item['first_seen_camera']}".lower()
+            hay = f"{item['name']} {item['person_id']} {item['last_seen_camera']} {item['first_seen_camera']} {item['status']}".lower()
             if q not in hay:
                 continue
 
@@ -176,6 +319,7 @@ def get_recognition_summaries(
         message=f"Retrieved {len(summaries)} person recognition summaries.",
         data=summaries,
     )
+
 
 @router.get("/persons", response_model=APIResponse)
 def get_persons(db: Session = Depends(get_db)):
@@ -288,7 +432,7 @@ def update_person(person_id: str, req: PersonUpdateRequest, db: Session = Depend
         person.email = req.email or None
     if req.notes is not None:
         person.notes = req.notes or None
-    person.updated_at = datetime.utcnow()
+    person.updated_at = datetime.now()
     db.commit()
 
     try:

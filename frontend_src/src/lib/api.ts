@@ -64,7 +64,13 @@ export interface RecognitionPersonSummary {
   last_seen_camera: string
   first_seen_time?: string
   first_seen_camera?: string
+  total_duration_seconds?: number
+  total_duration?: string
+  visit_count?: number
+  is_currently_present?: boolean
+  status?: string
 }
+
 
 export interface DetectedFace {
   track_id: number
@@ -100,8 +106,15 @@ export interface PersonUpdatePayload {
   notes?: string
 }
 
+export interface RecognitionDateItem {
+  date_key: string
+  date_formatted: string
+  count: number
+  is_today?: boolean
+}
+
 const apiClient = axios.create({
-  baseURL: '',
+  baseURL: '/api',
 })
 
 export async function getHealth(): Promise<HealthData> {
@@ -114,21 +127,40 @@ export async function getCameras(): Promise<CameraConfig[]> {
   return response.data.data
 }
 
-export async function getRecognitions(limit: number = 200, personId?: string): Promise<RecognitionEvent[]> {
+export async function getRecognitionDates(): Promise<RecognitionDateItem[]> {
+  const response = await apiClient.get('/recognitions/dates')
+  return response.data.data || []
+}
+
+export async function getRecognitions(
+  limit: number = 200,
+  personId?: string,
+  dateKey?: string,
+  category?: string
+): Promise<RecognitionEvent[]> {
   const params = new URLSearchParams()
   params.set('limit', String(limit))
   if (personId) params.set('person_id', personId)
+  if (dateKey && dateKey !== 'all') params.set('date_key', dateKey)
+  if (category && category !== 'all') params.set('category', category)
   const response = await apiClient.get(`/recognitions?${params.toString()}`)
   return response.data.data
 }
 
-export async function getRecognitionSummaries(search?: string): Promise<RecognitionPersonSummary[]> {
+export async function getRecognitionSummaries(
+  search?: string,
+  dateKey?: string,
+  category?: string
+): Promise<RecognitionPersonSummary[]> {
   const params = new URLSearchParams()
   if (search) params.set('search', search)
+  if (dateKey && dateKey !== 'all') params.set('date_key', dateKey)
+  if (category && category !== 'all') params.set('category', category)
   const qs = params.toString()
   const response = await apiClient.get(`/recognitions/summary${qs ? `?${qs}` : ''}`)
   return response.data.data
 }
+
 
 export async function getDetectedFaces(): Promise<DetectedFace[]> {
   const response = await apiClient.get('/detected_faces')
@@ -244,3 +276,147 @@ export async function downloadReportCsv(filters: ReportFilters = {}): Promise<vo
 export async function downloadReportPdf(filters: ReportFilters = {}): Promise<void> {
   await downloadFile(`/reports/export/pdf${buildQuery(filters)}`, 'recognition_report.pdf')
 }
+
+// ── Visitor Re-ID Subsystem API ──────────────────────────────────────────────
+export interface VisitorItem {
+  id: number
+  visitor_code: string
+  date_key: string
+  first_seen_at: string
+  last_seen_at: string
+  first_camera_id: string
+  last_camera_id: string
+  sighting_count: number
+  status: string
+  promoted_person_id?: string
+  primary_snapshot_url?: string
+}
+
+export interface VisitorDateItem {
+  date_key: string
+  date_formatted: string
+  count: number
+  is_today: boolean
+}
+
+export interface VisitorSighting {
+  id: number
+  camera_id: string
+  camera_name: string
+  track_id: string
+  entered_at: string
+  last_seen_at: string
+  duration_formatted: string
+  best_similarity: number
+  second_best_similarity: number
+  match_margin: number
+  identity_confidence: number
+  snapshot_url?: string
+  metadata?: any
+}
+
+export interface VisitorTimelineResponse {
+  visitor_code: string
+  date_key: string
+  first_seen_at: string
+  last_seen_at: string
+  status: string
+  primary_snapshot_url?: string
+  sightings: VisitorSighting[]
+}
+
+export interface VisitorStats {
+  date_key: string
+  total_visitors_today: number
+  active_visitors: number
+  promoted_visitors: number
+  online_cameras: number
+  total_sightings: number
+}
+
+export async function getVisitorDates(): Promise<VisitorDateItem[]> {
+  const res = await apiClient.get('/visitors/dates')
+  return res.data.data
+}
+
+export async function getVisitors(params: { date_key?: string; camera_id?: string; status?: string; search?: string } = {}): Promise<{ total: number; visitors: VisitorItem[] }> {
+  const q = new URLSearchParams()
+  if (params.date_key) q.set('date_key', params.date_key)
+  if (params.camera_id) q.set('camera_id', params.camera_id)
+  if (params.status) q.set('status', params.status)
+  if (params.search) q.set('search', params.search)
+  const res = await apiClient.get(`/visitors?${q.toString()}`)
+  return res.data.data
+}
+
+export async function getVisitorStats(date_key?: string): Promise<VisitorStats> {
+  const url = date_key ? `/visitors/stats?date_key=${date_key}` : '/visitors/stats'
+  const res = await apiClient.get(url)
+  return res.data.data
+}
+
+export async function getVisitorTimeline(visitorId: number, dateKey?: string): Promise<VisitorTimelineResponse> {
+  const url = dateKey && dateKey !== 'all' ? `/visitors/${visitorId}/timeline?date_key=${dateKey}` : `/visitors/${visitorId}/timeline`
+  const res = await apiClient.get(url)
+  return res.data.data
+}
+
+export async function promoteVisitor(visitorId: number, payload: {
+  first_name: string
+  last_name: string
+  department?: string
+  role?: string
+  phone?: string
+  email?: string
+  notes?: string
+}): Promise<any> {
+  const res = await apiClient.post(`/visitors/${visitorId}/promote`, payload)
+  return res.data
+}
+
+export interface VisitorSampleSnapshot {
+  id: number
+  camera_id: string
+  timestamp: string
+  quality_score: number
+  yaw: number
+  pitch: number
+  blur_score: number
+  snapshot_url?: string
+}
+
+export async function getVisitorSnapshots(visitorId: number, dateKey?: string): Promise<VisitorSampleSnapshot[]> {
+  const url = dateKey && dateKey !== 'all' ? `/visitors/${visitorId}/snapshots?date_key=${dateKey}` : `/visitors/${visitorId}/snapshots`
+  const res = await apiClient.get(url)
+  return res.data.data
+}
+
+
+export async function deleteVisitor(visitorId: number): Promise<any> {
+  const res = await apiClient.delete(`/visitors/${visitorId}`)
+  return res.data
+}
+
+export async function purgeAllVisitors(): Promise<any> {
+  const res = await apiClient.delete('/visitors/purge_all')
+  return res.data
+}
+
+export async function downloadVisitorReportCsv(params: { date_key?: string; status?: string; camera_id?: string } = {}): Promise<void> {
+  const q = new URLSearchParams()
+  if (params.date_key) q.set('date_key', params.date_key)
+  if (params.status) q.set('status', params.status)
+  if (params.camera_id) q.set('camera_id', params.camera_id)
+  await downloadFile(`/visitors/export/csv?${q.toString()}`, `visitor_report_${params.date_key || 'today'}.csv`)
+}
+
+export async function downloadVisitorReportPdf(params: { date_key?: string; status?: string; camera_id?: string } = {}): Promise<void> {
+  const q = new URLSearchParams()
+  if (params.date_key) q.set('date_key', params.date_key)
+  if (params.status) q.set('status', params.status)
+  if (params.camera_id) q.set('camera_id', params.camera_id)
+  await downloadFile(`/visitors/export/pdf?${q.toString()}`, `visitor_report_${params.date_key || 'today'}.pdf`)
+}
+
+
+

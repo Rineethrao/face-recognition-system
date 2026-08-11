@@ -9,6 +9,7 @@ import { TopBar } from '../components/TopBar'
 import { BrowserWebcam } from '../components/BrowserWebcam'
 import { useStore } from '../store/useStore'
 import { getCameras, getRecognitions, getDetectedFaces } from '../lib/api'
+import { updateCamera } from '../lib/cameraApi'
 import type { RecognitionEvent, DetectedFace } from '../lib/api'
 import { Card, CardHeader, CardTitle, CardBody } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
@@ -44,12 +45,34 @@ function latestEventsByPerson(events: RecognitionEvent[]): RecognitionEvent[] {
 
 function RecognitionCard({ event, nowMs }: { event: RecognitionEvent; nowMs: number }) {
   const isUnknown = event.person_id === 'unknown'
-  const [imgSrc, setImgSrc] = useState<string>(() =>
-    isUnknown ? '' : `/faces/${event.person_id}/sample_1_frontal.jpg`
-  )
+  const isVisitor = (event.person_id || '').startsWith('VISITOR-') || (event.name || '').startsWith('VISITOR-')
+
+  const [imgSrc, setImgSrc] = useState<string>(() => {
+    if (isUnknown) return ''
+    if (event.face_snapshot_url) {
+      const url = String(event.face_snapshot_url).replace(/\\/g, '/')
+      if (url.includes('storage/visitors/')) {
+        return `/faces/visitors/${url.split('storage/visitors/')[1]}`
+      }
+      return url
+    }
+    if (isVisitor) {
+      const code = event.person_id || event.name || ''
+      const parts = code.split('-')
+      if (parts.length >= 2) {
+        const dateKey = parts[1]
+        return `/faces/visitors/${dateKey}/${code}/primary_avatar.jpg`
+      }
+    }
+    return `/faces/${event.person_id}/sample_1_frontal.jpg`
+  })
   const [imgError, setImgError] = useState(false)
 
   const handleImgError = () => {
+    if (isVisitor) {
+      setImgError(true)
+      return
+    }
     if (imgSrc.endsWith('sample_1_frontal.jpg')) {
       setImgSrc(`/faces/${event.person_id}/sample_1.jpg`)
     } else if (imgSrc.endsWith('sample_1.jpg')) {
@@ -69,6 +92,8 @@ function RecognitionCard({ event, nowMs }: { event: RecognitionEvent; nowMs: num
         'p-3 rounded-2xl border transition-all duration-150 flex items-center gap-3',
         isUnknown
           ? 'bg-amber-500/5 border-amber-500/25 hover:border-amber-500/40'
+          : isVisitor
+          ? 'bg-cyan-500/10 border-cyan-500/30 hover:border-cyan-500/50 shadow-sm'
           : 'bg-white/85 dark:bg-slate-900/80 border-slate-200 dark:border-slate-800 hover:border-blue-500/40 shadow-sm'
       )}
     >
@@ -76,7 +101,11 @@ function RecognitionCard({ event, nowMs }: { event: RecognitionEvent; nowMs: num
       <div
         className={clsx(
           'w-12 h-12 rounded-xl flex items-center justify-center font-bold text-sm flex-shrink-0 overflow-hidden border relative bg-slate-950 shadow-md',
-          isUnknown ? 'border-amber-500/40 text-amber-400' : 'border-emerald-500/40 text-emerald-400'
+          isUnknown
+            ? 'border-amber-500/40 text-amber-400'
+            : isVisitor
+            ? 'border-cyan-500/50 text-cyan-400'
+            : 'border-emerald-500/40 text-emerald-400'
         )}
       >
         {!isUnknown && !imgError && imgSrc ? (
@@ -87,17 +116,17 @@ function RecognitionCard({ event, nowMs }: { event: RecognitionEvent; nowMs: num
             className="w-full h-full object-cover"
           />
         ) : (
-          <span>{isUnknown ? '?' : (event.name?.[0]?.toUpperCase() || 'U')}</span>
+          <span>{isUnknown ? '?' : isVisitor ? 'V' : (event.name?.[0]?.toUpperCase() || 'U')}</span>
         )}
 
         {!isUnknown && (
           <div
             className={clsx(
               'absolute bottom-0 left-0 right-0 text-[8px] font-bold text-center py-0.2 uppercase text-black',
-              pct >= 70 ? 'bg-emerald-400' : 'bg-amber-400'
+              isVisitor ? 'bg-cyan-400' : pct >= 70 ? 'bg-emerald-400' : 'bg-amber-400'
             )}
           >
-            Match
+            {isVisitor ? 'Visitor' : 'Match'}
           </div>
         )}
       </div>
@@ -105,9 +134,21 @@ function RecognitionCard({ event, nowMs }: { event: RecognitionEvent; nowMs: num
       {/* Details */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-1 mb-0.5">
-          <span className={clsx('text-xs font-bold truncate', isUnknown ? 'text-amber-600 dark:text-amber-300' : 'text-slate-900 dark:text-white')}>
-            {isUnknown ? 'Unknown Person' : event.name}
+          <span className={clsx(
+            'text-xs font-bold truncate',
+            isUnknown
+              ? 'text-amber-600 dark:text-amber-300'
+              : isVisitor
+              ? 'text-cyan-400'
+              : 'text-slate-900 dark:text-white'
+          )}>
+            {isUnknown ? 'Unknown Person' : event.name || event.person_id}
           </span>
+          {isVisitor && (
+            <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+              Visitor
+            </span>
+          )}
         </div>
 
         <div className="text-[10px] text-slate-500 dark:text-slate-400 flex items-center justify-between">
@@ -130,11 +171,14 @@ interface CameraCardProps {
   location: string
   isOnline: boolean
   camId: string
+  enabled: boolean
   onExpand?: () => void
+  onToggle?: () => void
   isSingle?: boolean
+  isToggling?: boolean
 }
 
-function CameraCard({ name, location, isOnline, camId, onExpand }: CameraCardProps) {
+function CameraCard({ name, location, isOnline, camId, enabled, onExpand, onToggle, isToggling }: CameraCardProps & { enabled: boolean; onToggle?: () => void; isToggling?: boolean }) {
   const imgRef = useRef<HTMLImageElement>(null)
   const [streamUrl, setStreamUrl] = useState(() => `/video_feed/${camId}`)
   const [hasError, setHasError] = useState(false)
@@ -191,7 +235,24 @@ function CameraCard({ name, location, isOnline, camId, onExpand }: CameraCardPro
         </div>
 
         {/* Actions */}
-        <div className="absolute top-2.5 right-2.5 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+        <div className="absolute top-2.5 right-2.5 flex items-center gap-2 opacity-100 z-10">
+          <button
+            onClick={onToggle}
+            disabled={isToggling}
+            className={clsx(
+              'flex items-center gap-2 rounded-full px-3 py-1 text-[11px] font-semibold transition-all border',
+              enabled
+                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25'
+                : 'bg-slate-800/90 text-slate-300 border-slate-700 hover:bg-slate-700'
+            )}
+            title="Toggle recognition on/off"
+          >
+            <span className={clsx(
+              'w-2.5 h-2.5 rounded-full',
+              enabled ? 'bg-emerald-400' : 'bg-slate-500'
+            )} />
+            {enabled ? 'ON' : 'OFF'}
+          </button>
           <button
             onClick={refreshStream}
             className="w-7 h-7 rounded-xl bg-black/70 backdrop-blur-md flex items-center justify-center text-white hover:bg-blue-600 transition-colors border border-white/10"
@@ -217,9 +278,25 @@ function CameraCard({ name, location, isOnline, camId, onExpand }: CameraCardPro
           <div className="text-xs font-bold text-white truncate">{name}</div>
           <div className="text-[10px] text-slate-400 truncate">{location} • ID: {camId}</div>
         </div>
-        <Badge variant={isOnline && !hasError ? 'success' : 'danger'} dot size="sm">
-          {isOnline && !hasError ? 'Online' : 'Offline'}
-        </Badge>
+        <div className="flex flex-col items-end gap-2">
+          <Badge variant={isOnline && !hasError ? 'success' : 'danger'} dot size="sm">
+            {isOnline && !hasError ? 'Online' : 'Offline'}
+          </Badge>
+          {onToggle ? (
+            <button
+              onClick={onToggle}
+              disabled={isToggling}
+              className={clsx(
+                'text-[11px] font-semibold px-3 py-1 rounded-full transition-colors border',
+                enabled
+                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/25 hover:bg-emerald-500/25'
+                  : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+              )}
+            >
+              {enabled ? 'Recognition ON' : 'Recognition OFF'}
+            </button>
+          ) : null}
+        </div>
       </div>
     </div>
   )
@@ -283,6 +360,38 @@ export function LiveRecognition() {
     if (count <= 4) return 'grid-cols-2 grid-rows-2 h-full'
     if (count <= 6) return 'grid-cols-3 grid-rows-2 h-full'
     return 'grid-cols-3 grid-rows-3 h-full'
+  }
+
+  const [togglingCameraId, setTogglingCameraId] = useState<string | null>(null)
+
+  const toggleCameraRecognition = async (cam: any) => {
+    const camId = cam.id || cam.camera_id
+    if (!camId) return
+    setTogglingCameraId(camId)
+    try {
+      await updateCamera(camId, {
+        id: camId,
+        camera_id: camId,
+        name: cam.name,
+        location: cam.location,
+        description: cam.description || '',
+        brand: cam.brand || 'Custom',
+        ip_address: cam.ip_address || '',
+        port: cam.port || 554,
+        username: cam.username || '',
+        password: cam.password || '',
+        channel: cam.channel || 1,
+        stream_type: cam.stream_type || 'sub',
+        enabled: !cam.enabled,
+        rotation: cam.rotation || 0,
+        source: cam.source || '',
+      })
+      await getCameras().then(setCameras)
+    } catch (err) {
+      console.error('Failed to toggle camera recognition:', err)
+    } finally {
+      setTogglingCameraId(null)
+    }
   }
 
   return (
@@ -382,17 +491,23 @@ export function LiveRecognition() {
             {showBrowserCam && (
               <BrowserWebcam onRecognized={() => getRecognitions(30).then(setEvents).catch(() => {})} />
             )}
-            {filteredCams.map((cam) => (
-              <CameraCard
-                key={cam.id}
-                camId={cam.id}
-                name={cam.name}
-                location={cam.location}
-                isOnline={cam.enabled && cam.status !== 'OFFLINE'}
-                onExpand={() => setLayout('1x1')}
-                isSingle={filteredCams.length === 1}
-              />
-            ))}
+            {filteredCams.map((cam) => {
+              const camId = cam.id || cam.camera_id
+              return (
+                <CameraCard
+                  key={camId}
+                  camId={camId}
+                  name={cam.name}
+                  location={cam.location}
+                  enabled={cam.enabled}
+                  isOnline={cam.enabled && cam.status !== 'OFFLINE'}
+                  onExpand={() => setLayout('1x1')}
+                  onToggle={() => toggleCameraRecognition(cam)}
+                  isToggling={togglingCameraId === camId}
+                  isSingle={filteredCams.length === 1}
+                />
+              )
+            })}
 
             {filteredCams.length === 0 && !showBrowserCam && (
               <EmptyState

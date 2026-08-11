@@ -218,18 +218,15 @@ class RecognitionService:
                     aligned_crop = eval_res["aligned_crop"]
                     embedding = self.arcface.extract_embedding(aligned_crop)
 
-                    # Search FAISS index
+                    # Step 1: Registered recognition via FAISS
                     match = self.recognize_embedding(embedding, track_id=track_id, camera_id=camera_id)
 
-                    # Store final match
-                    cache["final_match"] = {
-                        "person_id": match.person_id,
-                        "name": match.name,
-                        "similarity": match.similarity
-                    }
-
-                    # Trigger progressive learning if match was successful
                     if match.person_id != "unknown":
+                        cache["final_match"] = {
+                            "person_id": match.person_id,
+                            "name": match.name,
+                            "similarity": match.similarity
+                        }
                         try:
                             from app.services.learning.progressive_learning import progressive_learning_engine
                             progressive_learning_engine.queue_profile_auto_improvement(
@@ -242,6 +239,55 @@ class RecognitionService:
                             )
                         except Exception as pl_err:
                             logger.error(f"Error triggering progressive learning: {pl_err}")
+                    else:
+                        # Step 2: Unregistered track handling via VisitorManager
+                        try:
+                            from app.core.database import SessionLocal
+                            from app.visitors.visitor_manager import visitor_manager
+                            from app.visitors.face_quality import visitor_quality_evaluator
+                            db = SessionLocal()
+                            try:
+                                fq_res = visitor_quality_evaluator.evaluate_quality(best_f, best_box, best_lms)
+                                vis_res = visitor_manager.resolve_unregistered_track(
+                                    db=db,
+                                    camera_id=camera_id,
+                                    track_id=track_id,
+                                    embedding=embedding,
+                                    quality_res=fq_res,
+                                    crop_img=aligned_crop
+                                )
+                                if vis_res.is_resolved:
+                                    cache["final_match"] = {
+                                        "person_id": vis_res.visitor_code,
+                                        "name": vis_res.visitor_code,
+                                        "similarity": vis_res.similarity
+                                    }
+                                    cache["recognition_attempted"] = True
+                                else:
+                                    # Still identifying — do not lock final_match yet so next quality frames accumulate
+                                    cache["recognition_attempted"] = False
+                                    cache["frames_collected"] = 0
+                                    cache["best_quality_est"] = -1.0
+                                    cache["best_frame"] = None
+                                    cache["final_match"] = None
+                                    results.append(RecognitionMatch(
+                                        person_id="unknown",
+                                        name=vis_res.visitor_code,
+                                        similarity=0.0,
+                                        track_id=track_id,
+                                        camera_id=camera_id,
+                                        timestamp=time.strftime("%H:%M:%S")
+                                    ))
+                                    continue
+                            finally:
+                                db.close()
+                        except Exception as vis_err:
+                            logger.error(f"Error in visitor track resolution: {vis_err}", exc_info=True)
+                            cache["final_match"] = {
+                                "person_id": "unknown",
+                                "name": "Identifying...",
+                                "similarity": 0.0
+                            }
 
             # Return the finalized match
             match_info = cache["final_match"] or {

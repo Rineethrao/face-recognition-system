@@ -1,25 +1,52 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   Search, Download, ChevronDown, ChevronUp, Clock,
-  Camera as CameraIcon, User, List, Grid, Maximize2, X, RefreshCw
+  Camera as CameraIcon, User, List, Grid, Maximize2, X, RefreshCw,
+  Calendar, Filter, UserCheck, UserPlus, HelpCircle, Users
 } from 'lucide-react'
 
 import { TopBar } from '../components/TopBar'
-import { getRecognitions, getRecognitionSummaries } from '../lib/api'
-import type { RecognitionEvent, RecognitionPersonSummary } from '../lib/api'
+import { getRecognitions, getRecognitionSummaries, getRecognitionDates } from '../lib/api'
+import type { RecognitionEvent, RecognitionPersonSummary, RecognitionDateItem } from '../lib/api'
 import { Badge } from '../components/ui/Badge'
 import { formatLocalDateTime, formatLocalTime } from '../lib/datetime'
 import clsx from 'clsx'
 
-function PersonAvatar({ personId, name }: { personId: string; name: string }) {
+function PersonAvatar({ personId, name, faceSnapshotUrl }: { personId: string; name: string; faceSnapshotUrl?: string }) {
   const isUnknown = personId === 'unknown'
-  const [imgSrc, setImgSrc] = useState<string>(() =>
-    isUnknown ? '' : `/faces/${personId}/sample_1_frontal.jpg`
-  )
+  const isVisitor = personId.startsWith('VISITOR')
+
+  const getInitialSrc = () => {
+    if (isUnknown) return ''
+    if (faceSnapshotUrl) return faceSnapshotUrl
+    if (isVisitor) {
+      if (personId.includes('_')) {
+        return `/faces/visitors/2026-08-11/${personId}/primary_avatar.jpg`
+      }
+      const parts = personId.split('-')
+      if (parts.length >= 2) {
+        return `/faces/visitors/${parts[1]}/${personId}/primary_avatar.jpg`
+      }
+    }
+    return `/faces/${personId}/sample_1_frontal.jpg`
+  }
+
+  const [imgSrc, setImgSrc] = useState<string>(getInitialSrc)
   const [imgError, setImgError] = useState(false)
 
   const handleImgError = () => {
-    if (imgSrc.endsWith('sample_1_frontal.jpg')) {
+    if (faceSnapshotUrl && imgSrc === faceSnapshotUrl) {
+      if (isVisitor) {
+        const parts = personId.split('-')
+        if (parts.length >= 2) {
+          setImgSrc(`/faces/visitors/${parts[1]}/${personId}/primary_avatar.jpg`)
+          return
+        }
+      }
+      setImgSrc(`/faces/${personId}/sample_1_frontal.jpg`)
+    } else if (imgSrc.endsWith('primary_avatar.jpg')) {
+      setImgSrc(`/faces/${personId}/sample_1_frontal.jpg`)
+    } else if (imgSrc.endsWith('sample_1_frontal.jpg')) {
       setImgSrc(`/faces/${personId}/sample_1.jpg`)
     } else if (imgSrc.endsWith('sample_1.jpg')) {
       setImgSrc(`/faces/${personId}/uploaded_1.jpg`)
@@ -48,6 +75,7 @@ function PersonAvatar({ personId, name }: { personId: string; name: string }) {
   )
 }
 
+
 export function Events() {
   const [summaries, setSummaries] = useState<RecognitionPersonSummary[]>([])
   const [events, setEvents] = useState<RecognitionEvent[]>([])
@@ -56,16 +84,26 @@ export function Events() {
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [viewMode, setViewMode] = useState<'grouped' | 'flat'>('grouped')
+  const [category, setCategory] = useState<'all' | 'registered' | 'visitor' | 'unknown'>('all')
+  const [selectedDate, setSelectedDate] = useState<string>('all')
+  const [datesList, setDatesList] = useState<RecognitionDateItem[]>([])
   const [expandedPersons, setExpandedPersons] = useState<Record<string, boolean>>({})
   const [lightboxImage, setLightboxImage] = useState<string | null>(null)
+
+  // Fetch available operational dates on mount
+  useEffect(() => {
+    getRecognitionDates().then(data => {
+      setDatesList(data || [])
+    }).catch(console.error)
+  }, [])
 
   const loadData = useCallback(async () => {
     try {
       if (viewMode === 'grouped') {
-        const data = await getRecognitionSummaries(search || undefined)
+        const data = await getRecognitionSummaries(search || undefined, selectedDate, category)
         setSummaries(data || [])
       } else {
-        const data = await getRecognitions(500)
+        const data = await getRecognitions(500, undefined, selectedDate, category)
         setEvents(data || [])
       }
     } catch (e) {
@@ -73,7 +111,7 @@ export function Events() {
     } finally {
       setLoading(false)
     }
-  }, [viewMode, search])
+  }, [viewMode, search, selectedDate, category])
 
   useEffect(() => {
     setLoading(true)
@@ -86,7 +124,7 @@ export function Events() {
     if (personEvents[personId]?.length) return
     setLoadingPersonEvents(prev => ({ ...prev, [personId]: true }))
     try {
-      const data = await getRecognitions(100, personId)
+      const data = await getRecognitions(100, personId, selectedDate, category)
       setPersonEvents(prev => ({ ...prev, [personId]: data || [] }))
     } catch (e) {
       console.error(e)
@@ -136,6 +174,110 @@ export function Events() {
       <TopBar title="Recognition Events" />
 
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        {/* Category Filter Pills & Toolbar */}
+        <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-4 bg-white/40 dark:bg-slate-900/40 p-3 rounded-2xl border border-slate-200 dark:border-white/5">
+          {/* Category Filter Pills */}
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 lg:pb-0">
+            <button
+              onClick={() => setCategory('all')}
+              className={clsx(
+                'px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap',
+                category === 'all'
+                  ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/5'
+              )}
+            >
+              <Users className="w-3.5 h-3.5" /> All Recognitions
+            </button>
+
+            <button
+              onClick={() => setCategory('registered')}
+              className={clsx(
+                'px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap',
+                category === 'registered'
+                  ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/5'
+              )}
+            >
+              <UserCheck className="w-3.5 h-3.5" /> Registered Persons
+            </button>
+
+            <button
+              onClick={() => setCategory('visitor')}
+              className={clsx(
+                'px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap',
+                category === 'visitor'
+                  ? 'bg-amber-600 text-white shadow-lg shadow-amber-600/20'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/5'
+              )}
+            >
+              <UserPlus className="w-3.5 h-3.5" /> Visitors (Unregistered)
+            </button>
+
+            <button
+              onClick={() => setCategory('unknown')}
+              className={clsx(
+                'px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap',
+                category === 'unknown'
+                  ? 'bg-slate-700 text-white shadow-lg shadow-slate-700/20'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/5'
+              )}
+            >
+              <HelpCircle className="w-3.5 h-3.5" /> Unknown
+            </button>
+          </div>
+
+          {/* Date Selector & View Controls */}
+          <div className="flex items-center gap-3">
+            {/* Date-wise Selector */}
+            <div className="relative flex items-center">
+              <Calendar className="absolute left-3 w-4 h-4 text-blue-500 pointer-events-none" />
+              <select
+                value={selectedDate}
+                onChange={e => setSelectedDate(e.target.value)}
+                className="input-field pl-9 pr-8 text-xs font-semibold bg-white dark:bg-slate-900 border-slate-200 dark:border-white/10 text-slate-800 dark:text-white appearance-none cursor-pointer"
+              >
+                <option value="all">All Dates History</option>
+                {datesList.map(d => (
+                  <option key={d.date_key} value={d.date_key}>
+                    {d.date_formatted} {d.is_today ? '(Today)' : ''} ({d.count} events)
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="absolute right-3 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+            </div>
+
+            {/* View Mode Switch */}
+            <div className="flex items-center gap-1 bg-white/60 dark:bg-slate-900/60 p-1 rounded-xl border border-slate-200 dark:border-white/5">
+              <button
+                onClick={() => setViewMode('grouped')}
+                className={clsx(
+                  'px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all',
+                  viewMode === 'grouped'
+                    ? 'bg-blue-600 text-white shadow'
+                    : 'text-slate-500 dark:text-slate-400 hover:text-white'
+                )}
+                title="Group by Person"
+              >
+                <Grid className="w-3.5 h-3.5" /> Grouped
+              </button>
+              <button
+                onClick={() => setViewMode('flat')}
+                className={clsx(
+                  'px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all',
+                  viewMode === 'flat'
+                    ? 'bg-blue-600 text-white shadow'
+                    : 'text-slate-500 dark:text-slate-400 hover:text-white'
+                )}
+                title="Flat chronological list"
+              >
+                <List className="w-3.5 h-3.5" /> List
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Search Bar & Export Controls */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="relative flex-1 max-w-md">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
@@ -148,33 +290,6 @@ export function Events() {
           </div>
 
           <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1 bg-white/60 dark:bg-slate-900/60 p-1 rounded-xl border border-slate-200 dark:border-white/5">
-              <button
-                onClick={() => setViewMode('grouped')}
-                className={clsx(
-                  'px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all',
-                  viewMode === 'grouped'
-                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20'
-                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/5'
-                )}
-                title="Group by Person"
-              >
-                <Grid className="w-3.5 h-3.5" /> Grouped
-              </button>
-              <button
-                onClick={() => setViewMode('flat')}
-                className={clsx(
-                  'px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all',
-                  viewMode === 'flat'
-                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20'
-                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/5'
-                )}
-                title="Flat chronological list"
-              >
-                <List className="w-3.5 h-3.5" /> Flat List
-              </button>
-            </div>
-
             <button onClick={() => { setLoading(true); loadData() }} className="btn-secondary whitespace-nowrap">
               <RefreshCw className="w-4 h-4" /> Refresh
             </button>
@@ -185,15 +300,12 @@ export function Events() {
           </div>
         </div>
 
-        <p className="text-[11px] text-slate-500">
-          Showing all registered people with detection history — not only live detections.
-        </p>
-
         {loading ? (
           <div className="flex items-center justify-center p-12 text-slate-400 text-sm font-medium">
             Loading recognition events...
           </div>
         ) : viewMode === 'grouped' ? (
+
           <div className="space-y-4">
             {summaries.map(group => {
               const isExpanded = expandedPersons[group.person_id]
@@ -215,7 +327,7 @@ export function Events() {
                     className="flex items-center justify-between p-4 cursor-pointer select-none hover:bg-slate-50 dark:hover:bg-white/5 transition-colors gap-4"
                   >
                     <div className="flex items-center gap-4 min-w-0">
-                      <PersonAvatar personId={group.person_id} name={group.name} />
+                      <PersonAvatar personId={group.person_id} name={group.name} faceSnapshotUrl={(group as any).face_snapshot_url} />
                       <div className="min-w-0">
                         <h4 className={clsx('font-bold leading-snug truncate', isUnknown ? 'text-amber-400' : 'text-slate-900 dark:text-white')}>
                           {group.name}
@@ -226,13 +338,39 @@ export function Events() {
                       </div>
                     </div>
 
-                    <div className="hidden md:flex items-center gap-6 text-slate-500 dark:text-slate-400 text-xs">
+                    <div className="hidden md:flex items-center gap-5 text-slate-500 dark:text-slate-400 text-xs">
                       <div>
-                        <div className="text-[10px] text-slate-505 uppercase font-bold tracking-wider mb-0.5">Last Seen Camera</div>
+                        <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider mb-0.5">Duration</div>
+                        <div className="font-bold text-emerald-400 font-mono">
+                          {group.total_duration || '0m'}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider mb-0.5">Visits</div>
+                        <div className="font-bold text-slate-200 font-mono text-center">
+                          {group.visit_count ?? 1}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider mb-0.5">Status</div>
+                        <span className={clsx(
+                          'px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider inline-flex items-center gap-1.5',
+                          group.is_currently_present || group.status === 'Live'
+                            ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                            : 'bg-slate-800/80 text-slate-400 border border-slate-700'
+                        )}>
+                          {(group.is_currently_present || group.status === 'Live') && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          )}
+                          {group.status || (group.is_currently_present ? 'Live' : 'Offline')}
+                        </span>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider mb-0.5">Last Camera</div>
                         <div className="font-mono text-slate-700 dark:text-slate-300">{group.last_seen_camera}</div>
                       </div>
                       <div>
-                        <div className="text-[10px] text-slate-505 uppercase font-bold tracking-wider mb-0.5">Avg Confidence</div>
+                        <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider mb-0.5">Avg Conf</div>
                         <span className={`conf-pill text-[10px] ${
                           group.avg_confidence >= 0.85 ? 'conf-high' : group.avg_confidence >= 0.7 ? 'conf-mid' : 'conf-low'
                         }`}>
@@ -240,20 +378,21 @@ export function Events() {
                         </span>
                       </div>
                       <div>
-                        <div className="text-[10px] text-slate-505 uppercase font-bold tracking-wider mb-0.5">First Seen</div>
+                        <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider mb-0.5">First Seen</div>
                         <div className="text-slate-700 dark:text-slate-300 flex items-center gap-1" title={group.first_seen_camera ? `Camera: ${group.first_seen_camera}` : undefined}>
-                          <Clock className="w-3.5 h-3.5 text-slate-400 dark:text-slate-505" />
+                          <Clock className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500" />
                           {group.first_seen_time ? formatLocalDateTime(group.first_seen_time) : '—'}
                         </div>
                       </div>
                       <div>
-                        <div className="text-[10px] text-slate-505 uppercase font-bold tracking-wider mb-0.5">Last Active</div>
+                        <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider mb-0.5">Last Active</div>
                         <div className="text-slate-700 dark:text-slate-300 flex items-center gap-1">
-                          <Clock className="w-3.5 h-3.5 text-slate-400 dark:text-slate-505" />
+                          <Clock className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500" />
                           {formatLocalTime(group.last_seen_time)}
                         </div>
                       </div>
                     </div>
+
 
                     <div className="md:hidden flex flex-col items-end gap-1.5">
                       <Badge variant={group.avg_confidence >= 0.85 ? 'success' : group.avg_confidence >= 0.7 ? 'warning' : 'danger'} size="sm">
