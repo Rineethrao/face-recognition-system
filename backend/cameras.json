@@ -32,10 +32,10 @@
     "channel": 1,
     "stream_type": "sub",
     "source": "rtsp://OfficeThree:Dft12345@192.168.0.41:554/stream2",
-    "enabled": false,
+    "enabled": true,
     "rotation": 90,
     "fps_limit": 30,
-    "status": "OFFLINE"
+    "status": "ONLINE"
   },
   {
     "id": "cam_04",
