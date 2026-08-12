@@ -17,8 +17,9 @@ class VisitorModel(Base):
     last_camera_id = Column(String(100), default='default')
     sighting_count = Column(Integer, default=1)
     primary_snapshot_path = Column(String(500), nullable=True)
-    status = Column(String(50), default='active', index=True)  # active, inactive, promoted
+    status = Column(String(50), default='active', index=True)  # active, inactive, promoted, merged
     promoted_person_id = Column(String(100), ForeignKey('persons.person_id'), nullable=True)
+    merged_into_visitor_id = Column(Integer, ForeignKey('visitors.id'), nullable=True, index=True)
 
     face_samples = relationship("VisitorFaceSampleModel", back_populates="visitor", cascade="all, delete-orphan")
     sightings = relationship("VisitorSightingModel", back_populates="visitor", cascade="all, delete-orphan")

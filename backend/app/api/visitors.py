@@ -28,6 +28,23 @@ class VisitorPromoteRequest(FlexibleModel):
     phone: Optional[str] = None
     email: Optional[str] = None
     notes: Optional[str] = None
+    merge_into_existing: bool = False
+    target_person_id: Optional[str] = None
+    additional_visitor_ids: Optional[List[int]] = None
+
+
+class BulkPromotePreviewRequest(FlexibleModel):
+    visitor_ids: List[int]
+
+
+class BulkPromoteRequest(VisitorPromoteRequest):
+    visitor_ids: List[int]
+    primary_visitor_id: Optional[int] = None
+
+
+class VisitorMergeRequest(FlexibleModel):
+    visitor_ids: List[int]
+    primary_visitor_id: Optional[int] = None
 
 
 def format_snapshot_url(path: Optional[str]) -> Optional[str]:
@@ -50,61 +67,30 @@ def format_snapshot_url(path: Optional[str]) -> Optional[str]:
     return f"/faces/visitors/{filename}"
 
 
-def resolve_visitor_primary_snapshot_url(v: VisitorModel, db: Session) -> Optional[str]:
-    """Resolves primary face snapshot URL for a visitor with robust fallbacks across DB and disk storage."""
+def resolve_visitor_primary_snapshot_url(v: VisitorModel, db: Optional[Session] = None) -> Optional[str]:
+    """Resolves primary face snapshot URL for a visitor instantly without N+1 database queries."""
     if v.primary_snapshot_path and os.path.exists(v.primary_snapshot_path):
         url = format_snapshot_url(v.primary_snapshot_path)
         if url:
             return url
 
-    sighting = db.query(VisitorSightingModel).filter(
-        VisitorSightingModel.visitor_id == v.id,
-        VisitorSightingModel.snapshot_path.isnot(None)
-    ).order_by(VisitorSightingModel.id.desc()).first()
-    if sighting and sighting.snapshot_path and os.path.exists(sighting.snapshot_path):
-        return format_snapshot_url(sighting.snapshot_path)
-
-    sample = db.query(VisitorFaceSampleModel).filter(
-        VisitorFaceSampleModel.visitor_id == v.id,
-        VisitorFaceSampleModel.snapshot_path.isnot(None)
-    ).order_by(VisitorFaceSampleModel.id.desc()).first()
-    if sample and sample.snapshot_path and os.path.exists(sample.snapshot_path):
-        return format_snapshot_url(sample.snapshot_path)
-
-    from app.models.db_models import RecognitionLogModel
-    log = db.query(RecognitionLogModel).filter(
-        RecognitionLogModel.person_id == v.visitor_code,
-        RecognitionLogModel.face_snapshot_path.isnot(None)
-    ).order_by(RecognitionLogModel.id.desc()).first()
-    if log and log.face_snapshot_path and os.path.exists(log.face_snapshot_path):
-        return format_snapshot_url(log.face_snapshot_path)
-
     try:
         from app.visitors.visitor_repository import get_visitor_folder_paths
         creation_date = v.created_date or v.date_key
-        v_dir, _, _ = get_visitor_folder_paths(creation_date, v.visitor_code)
-        
-        if v_dir.exists():
-            jpegs = list(v_dir.glob('*.jpg')) + list(v_dir.glob('samples/*.jpg')) + list(v_dir.glob('sightings/*.jpg'))
+        if creation_date:
+            v_dir, _, _ = get_visitor_folder_paths(creation_date, v.visitor_code)
+            cand_avatar = v_dir / "primary_avatar.jpg"
+            if cand_avatar.exists():
+                return format_snapshot_url(str(cand_avatar))
+
+            jpegs = list(v_dir.glob("*.jpg")) + list(v_dir.glob("samples/*.jpg")) + list(v_dir.glob("sightings/*.jpg"))
             if jpegs:
                 return format_snapshot_url(str(jpegs[0]))
-
-        try:
-            import re
-            m = re.search(r'(\d+)$', v.visitor_code)
-            if m:
-                seq_num = int(m.group(1))
-                legacy_dir = v_dir.parent / f"Visitor_{seq_num}"
-                if legacy_dir.exists():
-                    legacy_jpegs = list(legacy_dir.glob('*.jpg')) + list(legacy_dir.glob('samples/*.jpg')) + list(legacy_dir.glob('sightings/*.jpg'))
-                    if legacy_jpegs:
-                        return format_snapshot_url(str(legacy_jpegs[0]))
-        except Exception:
-            pass
     except Exception:
         pass
 
     return None
+
 
 
 
@@ -338,16 +324,28 @@ def build_visitor_date_query(db: Session, date_key: Optional[str] = None):
         key_dash = f"{clean_key[:4]}-{clean_key[4:6]}-{clean_key[6:8]}" if len(clean_key) == 8 and clean_key.isdigit() else clean_key
 
     from app.visitors.models import VisitorVisitModel
+    from datetime import datetime, timedelta
 
     visit_subq = db.query(VisitorVisitModel.visitor_id).filter(
         VisitorVisitModel.date_key.in_([key_dash, key_nodash])
     ).scalar_subquery()
 
-    sighting_subq = db.query(VisitorSightingModel.visitor_id).filter(
-        (func.strftime("%Y-%m-%d", VisitorSightingModel.entered_at) == key_dash) |
-        (func.strftime("%Y%m%d", VisitorSightingModel.entered_at) == key_nodash)
-    ).scalar_subquery()
+    try:
+        if "-" in key_dash and len(key_dash) == 10:
+            dt_start = datetime.strptime(key_dash, "%Y-%m-%d")
+        else:
+            dt_start = datetime.strptime(key_nodash, "%Y%m%d")
+        dt_end = dt_start + timedelta(days=1)
 
+        sighting_subq = db.query(VisitorSightingModel.visitor_id).filter(
+            VisitorSightingModel.entered_at >= dt_start,
+            VisitorSightingModel.entered_at < dt_end
+        ).scalar_subquery()
+    except Exception:
+        sighting_subq = db.query(VisitorSightingModel.visitor_id).filter(
+            (func.strftime("%Y-%m-%d", VisitorSightingModel.entered_at) == key_dash) |
+            (func.strftime("%Y%m%d", VisitorSightingModel.entered_at) == key_nodash)
+        ).scalar_subquery()
 
     return db.query(VisitorModel).filter(
         (VisitorModel.date_key.in_([key_dash, key_nodash])) |
@@ -355,6 +353,7 @@ def build_visitor_date_query(db: Session, date_key: Optional[str] = None):
         (VisitorModel.id.in_(visit_subq)) |
         (VisitorModel.id.in_(sighting_subq))
     )
+
 
 
 @router.get("", response_model=APIResponse)
@@ -368,19 +367,32 @@ def get_visitors(
     db: Session = Depends(get_db)
 ):
     """Retrieves paginated visitor profiles active on target date, camera, status, or visitor code."""
-    if date_key and date_key.lower() == "all":
+    if hasattr(date_key, "default"):
+        date_key = date_key.default
+    if hasattr(camera_id, "default"):
+        camera_id = camera_id.default
+    if hasattr(status, "default"):
+        status = status.default
+    if hasattr(search, "default"):
+        search = search.default
+
+    if isinstance(date_key, str) and date_key.lower().strip() == "all":
         query = db.query(VisitorModel)
-    elif date_key and date_key.strip():
+    elif isinstance(date_key, str) and date_key.strip():
         query = build_visitor_date_query(db, date_key.strip())
     else:
         date_key = get_operational_date_key()
         query = build_visitor_date_query(db, date_key)
+
 
     if camera_id and isinstance(camera_id, str):
         query = query.filter((VisitorModel.first_camera_id == camera_id) | (VisitorModel.last_camera_id == camera_id))
 
     if status and isinstance(status, str):
         query = query.filter(VisitorModel.status == status)
+    else:
+        # Hide absorbed duplicate profiles unless explicitly filtering by status
+        query = query.filter(VisitorModel.status != 'merged')
 
     if search and isinstance(search, str) and search.strip():
         s = f"%{search.strip()}%"
@@ -396,6 +408,10 @@ def get_visitors(
 
     items = []
     for v in visitors:
+        merged_from = db.query(VisitorModel.visitor_code).filter(
+            VisitorModel.merged_into_visitor_id == v.id,
+            VisitorModel.status == 'merged',
+        ).all()
         items.append({
             "id": v.id,
             "visitor_code": v.visitor_code,
@@ -408,6 +424,7 @@ def get_visitors(
             "sighting_count": v.sighting_count,
             "status": v.status,
             "promoted_person_id": v.promoted_person_id,
+            "merged_from_codes": [row[0] for row in merged_from],
             "primary_snapshot_url": resolve_visitor_primary_snapshot_url(v, db)
         })
 
@@ -430,9 +447,13 @@ def get_visitor_stats(
     db: Session = Depends(get_db)
 ):
     """Returns dashboard summary stats for visitor tracking."""
-    if date_key and date_key.lower() == 'all':
+    if hasattr(date_key, "default"):
+        date_key = date_key.default
+
+    if isinstance(date_key, str) and date_key.lower().strip() == 'all':
         total_visitors = db.query(VisitorModel).count()
         active_count = db.query(VisitorModel).filter(VisitorModel.status == 'active').count()
+
         promoted_count = db.query(VisitorModel).filter(VisitorModel.status == 'promoted').count()
         total_sightings = db.query(func.count(VisitorSightingModel.id)).scalar() or 0
         date_key_val = "all"
@@ -484,6 +505,10 @@ def get_visitor_detail(
         raise HTTPException(status_code=404, detail=f"Visitor ID {visitor_id} not found.")
 
     samples_count = db.query(VisitorFaceSampleModel).filter(VisitorFaceSampleModel.visitor_id == visitor_id).count()
+    merged_from = db.query(VisitorModel.visitor_code).filter(
+        VisitorModel.merged_into_visitor_id == visitor_id,
+        VisitorModel.status == 'merged',
+    ).all()
 
     return APIResponse(
         status="success",
@@ -500,6 +525,7 @@ def get_visitor_detail(
             "samples_count": samples_count,
             "status": v.status,
             "promoted_person_id": v.promoted_person_id,
+            "merged_from_codes": [row[0] for row in merged_from],
             "primary_snapshot_url": resolve_visitor_primary_snapshot_url(v, db)
         }
     )
@@ -532,10 +558,22 @@ def get_visitor_timeline(
             key_nodash = clean_key
             key_dash = f"{clean_key[:4]}-{clean_key[4:6]}-{clean_key[6:8]}" if len(clean_key) == 8 and clean_key.isdigit() else clean_key
 
-        query = query.filter(
-            (func.strftime("%Y-%m-%d", VisitorSightingModel.entered_at) == key_dash) |
-            (func.strftime("%Y%m%d", VisitorSightingModel.entered_at) == key_nodash)
-        )
+        try:
+            from datetime import datetime, timedelta
+            if "-" in key_dash and len(key_dash) == 10:
+                dt_start = datetime.strptime(key_dash, "%Y-%m-%d")
+            else:
+                dt_start = datetime.strptime(key_nodash, "%Y%m%d")
+            dt_end = dt_start + timedelta(days=1)
+            query = query.filter(
+                VisitorSightingModel.entered_at >= dt_start,
+                VisitorSightingModel.entered_at < dt_end
+            )
+        except Exception:
+            query = query.filter(
+                (func.strftime("%Y-%m-%d", VisitorSightingModel.entered_at) == key_dash) |
+                (func.strftime("%Y%m%d", VisitorSightingModel.entered_at) == key_nodash)
+            )
 
     sightings = query.order_by(VisitorSightingModel.entered_at.asc()).all()
 
@@ -626,12 +664,25 @@ def get_visitor_snapshots(
             key_nodash = clean_key
             key_dash = f"{clean_key[:4]}-{clean_key[4:6]}-{clean_key[6:8]}" if len(clean_key) == 8 and clean_key.isdigit() else clean_key
 
-        query = query.filter(
-            (func.strftime("%Y-%m-%d", VisitorFaceSampleModel.timestamp) == key_dash) |
-            (func.strftime("%Y%m%d", VisitorFaceSampleModel.timestamp) == key_nodash)
-        )
+        try:
+            from datetime import datetime, timedelta
+            if "-" in key_dash and len(key_dash) == 10:
+                dt_start = datetime.strptime(key_dash, "%Y-%m-%d")
+            else:
+                dt_start = datetime.strptime(key_nodash, "%Y%m%d")
+            dt_end = dt_start + timedelta(days=1)
+            query = query.filter(
+                VisitorFaceSampleModel.timestamp >= dt_start,
+                VisitorFaceSampleModel.timestamp < dt_end
+            )
+        except Exception:
+            query = query.filter(
+                (func.strftime("%Y-%m-%d", VisitorFaceSampleModel.timestamp) == key_dash) |
+                (func.strftime("%Y%m%d", VisitorFaceSampleModel.timestamp) == key_nodash)
+            )
 
     samples = query.order_by(VisitorFaceSampleModel.quality_score.desc()).all()
+
 
     items = []
     for s in samples:
@@ -652,6 +703,159 @@ def get_visitor_snapshots(
         data=items
     )
 
+
+
+@router.post("/bulk-promote-preview", response_model=APIResponse)
+def get_bulk_promote_preview(
+    req: BulkPromotePreviewRequest,
+    db: Session = Depends(get_db)
+):
+    """Preview merging multiple duplicate visitors into one registered person."""
+    try:
+        preview = visitor_repository.get_bulk_promote_preview(db=db, visitor_ids=req.visitor_ids)
+        return APIResponse(
+            status="success",
+            message="Bulk promotion preview loaded.",
+            data=preview
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Failed bulk promote preview: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/bulk-promote", response_model=APIResponse)
+def bulk_promote_visitors(
+    req: BulkPromoteRequest,
+    db: Session = Depends(get_db)
+):
+    """Register multiple duplicate visitors as a single registered person."""
+    if not req.visitor_ids:
+        raise HTTPException(status_code=400, detail="At least one visitor must be selected.")
+
+    try:
+        person = visitor_repository.promote_visitors_to_person(
+            db=db,
+            visitor_ids=req.visitor_ids,
+            primary_visitor_id=req.primary_visitor_id,
+            first_name=req.first_name,
+            last_name=req.last_name,
+            department=req.department,
+            role=req.role,
+            phone=req.phone,
+            email=req.email,
+            notes=req.notes,
+            merge_into_existing=req.merge_into_existing,
+            target_person_id=req.target_person_id,
+        )
+        preview_codes = []
+        for vid in req.visitor_ids:
+            v = db.query(VisitorModel).filter(VisitorModel.id == vid).first()
+            if v:
+                preview_codes.append(v.visitor_code)
+        action = "merged into" if req.merge_into_existing else "registered as"
+        return APIResponse(
+            status="success",
+            message=(
+                f"Successfully {action} Person '{person.name}' from "
+                f"{len(req.visitor_ids)} visitor profile(s): {', '.join(preview_codes)}."
+            ),
+            data={
+                "visitor_codes": preview_codes,
+                "person_id": person.person_id,
+                "name": person.name,
+                "department": person.department,
+                "role": person.role,
+                "status": "promoted",
+                "merged": req.merge_into_existing,
+                "visitor_count": len(req.visitor_ids),
+            }
+        )
+    except ValueError as ve:
+        logger.warning(f"Bulk promote rejected: {ve}")
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Failed bulk promote: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/merge-preview", response_model=APIResponse)
+def get_merge_preview(
+    req: BulkPromotePreviewRequest,
+    db: Session = Depends(get_db)
+):
+    """Preview merging duplicate visitors into one tracking profile."""
+    try:
+        preview = visitor_repository.get_merge_preview(db=db, visitor_ids=req.visitor_ids)
+        return APIResponse(
+            status="success",
+            message="Merge preview loaded.",
+            data=preview
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Failed merge preview: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/merge", response_model=APIResponse)
+def merge_visitors(
+    req: VisitorMergeRequest,
+    db: Session = Depends(get_db)
+):
+    """Merge duplicate visitor profiles into one for unified tracking."""
+    if len(req.visitor_ids) < 2:
+        raise HTTPException(status_code=400, detail="Select at least two visitors to merge.")
+
+    try:
+        primary = visitor_repository.merge_visitors_into_one(
+            db=db,
+            visitor_ids=req.visitor_ids,
+            primary_visitor_id=req.primary_visitor_id,
+        )
+        merged_from = db.query(VisitorModel.visitor_code).filter(
+            VisitorModel.merged_into_visitor_id == primary.id,
+            VisitorModel.status == 'merged',
+        ).all()
+        return APIResponse(
+            status="success",
+            message=f"Merged duplicate visitors into {primary.visitor_code} for unified tracking.",
+            data={
+                "primary_visitor_id": primary.id,
+                "primary_visitor_code": primary.visitor_code,
+                "merged_from_codes": [row[0] for row in merged_from],
+                "sighting_count": primary.sighting_count,
+                "status": primary.status,
+            }
+        )
+    except ValueError as ve:
+        logger.warning(f"Merge rejected: {ve}")
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Failed to merge visitors: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{visitor_id}/promote-preview", response_model=APIResponse)
+def get_promote_preview(
+    visitor_id: int = Path(...),
+    db: Session = Depends(get_db)
+):
+    """Preview face samples to transfer and any existing registered-person match."""
+    try:
+        preview = visitor_repository.get_promote_preview(db=db, visitor_id=visitor_id)
+        return APIResponse(
+            status="success",
+            message="Promotion preview loaded.",
+            data=preview
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Failed promote preview for visitor {visitor_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/{visitor_id}/promote", response_model=APIResponse)
@@ -675,21 +879,30 @@ def promote_visitor(
             role=req.role,
             phone=req.phone,
             email=req.email,
-            notes=req.notes
+            notes=req.notes,
+            merge_into_existing=req.merge_into_existing,
+            target_person_id=req.target_person_id,
+            additional_visitor_ids=req.additional_visitor_ids,
         )
 
+        action = "merged into" if req.merge_into_existing else "registered as"
         return APIResponse(
             status="success",
-            message=f"Successfully promoted visitor {v.visitor_code} to registered Person '{person.name}'.",
+            message=f"Successfully {action} Person '{person.name}' from visitor {v.visitor_code}.",
             data={
                 "visitor_code": v.visitor_code,
                 "person_id": person.person_id,
                 "name": person.name,
                 "department": person.department,
                 "role": person.role,
-                "status": "promoted"
+                "status": "promoted",
+                "merged": req.merge_into_existing,
             }
         )
+    except ValueError as ve:
+        # Duplicate registered person / missing samples — client-facing validation
+        logger.warning(f"Promote rejected for visitor {visitor_id}: {ve}")
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
         logger.error(f"Failed to promote visitor {visitor_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

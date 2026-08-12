@@ -253,28 +253,49 @@ class VisitorManager:
             quality_res = kwargs["quality_eval"]
 
         if isinstance(quality_res, dict):
-            # Convert dict evaluation to FaceQualityResult object
+            # Convert dict evaluation to FaceQualityResult with full enrollment gates
             from app.visitors.face_quality import FaceQualityResult
             q_score = float(quality_res.get("quality_score", 0.0))
             passed = bool(quality_res.get("passed", True))
-            usable = passed and q_score >= getattr(settings, 'VISITOR_QUALITY_MATCHING_THRESH', 0.50)
-            usable_new = passed and q_score >= getattr(settings, 'VISITOR_QUALITY_ENROLLMENT_THRESH', 0.65)
+            yaw = float(quality_res.get("pose_yaw", 0.0))
+            pitch = float(quality_res.get("pose_pitch", 0.0))
+            blur = float(quality_res.get("blur_score", 0.0))
+            fw = float(quality_res.get("face_width", quality_res.get("face_size", 50.0)))
+            fh = float(quality_res.get("face_height", fw))
+            max_yaw = getattr(settings, 'VISITOR_MAX_ABS_YAW', 0.22)
+            max_pitch = getattr(settings, 'VISITOR_MAX_ABS_PITCH', 0.18)
+            min_blur = getattr(settings, 'VISITOR_MIN_BLUR_SCORE', 25.0)
+            max_blur = getattr(settings, 'VISITOR_MAX_BLUR_SCORE', 800.0)
+            min_w = getattr(settings, 'VISITOR_MIN_FACE_WIDTH', 40)
+            pose_ok = abs(yaw) <= max_yaw and abs(pitch) <= max_pitch
+            blur_ok = min_blur <= blur <= max_blur
+            size_ok = fw >= min_w and fh >= min_w
+            usable = passed and size_ok and q_score >= getattr(settings, 'VISITOR_QUALITY_MATCHING_THRESH', 0.42)
+            usable_new = (
+                usable and pose_ok and blur_ok and
+                fw >= getattr(settings, 'VISITOR_ENROLLMENT_MIN_FACE_WIDTH', 50) and
+                q_score >= getattr(settings, 'VISITOR_QUALITY_ENROLLMENT_THRESH', 0.62)
+            )
             quality_res = FaceQualityResult(
                 quality_score=q_score,
                 quality_tier="ENROLLMENT" if usable_new else ("MATCHING" if usable else "POOR"),
                 usable_for_matching=usable,
                 usable_for_new_identity=usable_new,
                 usable_for_gallery=usable_new,
-                usable_for_primary_avatar=usable_new,
-                face_width=float(quality_res.get("face_width", 50.0)),
-                face_height=float(quality_res.get("face_height", 50.0)),
-                blur_score=float(quality_res.get("blur_score", 0.0)),
+                usable_for_primary_avatar=usable_new and q_score >= getattr(settings, 'VISITOR_QUALITY_AVATAR_THRESH', 0.70),
+                face_width=fw,
+                face_height=fh,
+                blur_score=blur,
                 brightness=float(quality_res.get("brightness", 128.0)),
-                pose_yaw=float(quality_res.get("pose_yaw", 0.0)),
-                pose_pitch=float(quality_res.get("pose_pitch", 0.0)),
+                pose_yaw=yaw,
+                pose_pitch=pitch,
                 aligned_crop=quality_res.get("aligned_crop", crop_img),
-                passed_basic_quality=passed
+                passed_basic_quality=passed,
+                structure_score=float(quality_res.get("structure_score", 0.0)),
+                det_score=float(quality_res.get("det_score", 1.0)),
+                eye_distance=float(quality_res.get("eye_distance", 0.0)),
             )
+
 
         t_start = time.perf_counter()
         str_track_id = str(track_id)
@@ -363,17 +384,34 @@ class VisitorManager:
 
             # 3. BUFFER OBSERVATION FOR UNRESOLVED TRACK
             if cache_key not in self.track_observation_buffer:
-                self.track_observation_buffer[cache_key] = {
-                    "first_seen": now,
-                    "last_seen": now,
-                    "samples": []
-                }
+                found_prev = None
+                for (prev_cam, prev_tid), prev_buf in list(self.track_observation_buffer.items()):
+                    if prev_cam == camera_id and (now - prev_buf.get("last_seen", 0.0) < 3.0):
+                        prev_samples = prev_buf.get("samples", [])
+                        if prev_samples and embedding is not None:
+                            from app.core.utils import l2_normalize
+                            q_norm = l2_normalize(embedding)
+                            p_embs = [l2_normalize(s["embedding"]) for s in prev_samples if s.get("embedding") is not None]
+                            if p_embs:
+                                max_p_sim = max([float(np.dot(q_norm, pe.T)) for pe in p_embs])
+                                if max_p_sim >= 0.48:
+                                    found_prev = prev_buf
+                                    break
+                if found_prev is not None:
+                    self.track_observation_buffer[cache_key] = found_prev
+                else:
+                    self.track_observation_buffer[cache_key] = {
+                        "first_seen": now,
+                        "last_seen": now,
+                        "samples": []
+                    }
 
             buf = self.track_observation_buffer[cache_key]
             buf["last_seen"] = now
 
+
             if quality_res.usable_for_matching:
-                buf["samples"].append({
+                new_sample = {
                     "embedding": embedding,
                     "quality_score": quality_res.quality_score,
                     "quality_result": quality_res,
@@ -382,7 +420,38 @@ class VisitorManager:
                     "blur_score": quality_res.blur_score,
                     "crop": crop_img.copy() if crop_img is not None else None,
                     "timestamp": now
-                })
+                }
+                MAX_OBSERVATION_SAMPLES = 20
+                min_gap = float(getattr(settings, 'VISITOR_MIN_SAMPLE_GAP_SECONDS', 0.20))
+
+                # For enrollment-quality frames: enforce spacing so we collect distinct best frames
+                if quality_res.usable_for_new_identity:
+                    recent_enroll = [
+                        s for s in buf["samples"]
+                        if s.get("quality_result")
+                        and getattr(s["quality_result"], "usable_for_new_identity", False)
+                    ]
+                    if recent_enroll and abs(now - float(recent_enroll[-1].get("timestamp", 0.0))) < min_gap:
+                        # Replace last enrollment sample if this one is better quality
+                        last = recent_enroll[-1]
+                        if new_sample["quality_score"] > float(last.get("quality_score", 0.0)):
+                            idx = buf["samples"].index(last)
+                            buf["samples"][idx] = new_sample
+                    else:
+                        if len(buf["samples"]) < MAX_OBSERVATION_SAMPLES:
+                            buf["samples"].append(new_sample)
+                        else:
+                            min_idx = min(range(len(buf["samples"])), key=lambda i: buf["samples"][i]["quality_score"])
+                            if new_sample["quality_score"] > buf["samples"][min_idx]["quality_score"]:
+                                buf["samples"][min_idx] = new_sample
+                else:
+                    # Matching-only: keep for gallery search, never counts toward create
+                    if len(buf["samples"]) < MAX_OBSERVATION_SAMPLES:
+                        buf["samples"].append(new_sample)
+                    else:
+                        min_idx = min(range(len(buf["samples"])), key=lambda i: buf["samples"][i]["quality_score"])
+                        if new_sample["quality_score"] > buf["samples"][min_idx]["quality_score"]:
+                            buf["samples"][min_idx] = new_sample
 
             # 4. EVALUATE VISITOR GALLERY MATCH
             res = visitor_identity_resolver.resolve_visitor_candidate(embedding)
@@ -424,8 +493,49 @@ class VisitorManager:
                     reason=res.reason
                 )
 
-            # 6. PENDING MATCH (Ambiguous candidate or margin below required threshold)
+            # 6. PENDING MATCH — soft-confirm after consistent votes to prevent duplicate IDs
             if res.decision == 'PENDING':
+                if res.visitor_id:
+                    votes = buf.setdefault("pending_votes", {})
+                    votes[res.visitor_id] = votes.get(res.visitor_id, 0) + 1
+                    confirm_votes = int(getattr(settings, 'VISITOR_PENDING_CONFIRM_VOTES', 3))
+                    # Soft-attach when same candidate keeps winning the PENDING band
+                    if votes[res.visitor_id] >= confirm_votes and res.best_similarity >= getattr(
+                        settings, 'VISITOR_MATCH_LOW_THRESHOLD', 0.40
+                    ):
+                        self.track_identity_cache[cache_key] = {
+                            "visitor_id": res.visitor_id,
+                            "visitor_code": res.visitor_code,
+                            "similarity": res.best_similarity,
+                            "second_best_sim": res.second_best_similarity,
+                            "margin": res.match_margin,
+                            "confidence": res.confidence,
+                            "primary_snapshot_path": res.primary_snapshot_path,
+                            "last_seen": now,
+                            "last_sighting_heartbeat": now
+                        }
+                        self._enqueue_persistence_task(
+                            self._async_save_sighting,
+                            res.visitor_id, camera_id, str_track_id,
+                            res.best_similarity, res.second_best_similarity,
+                            res.match_margin, res.confidence, crop_img,
+                            embedding, quality_res, res.visitor_code
+                        )
+                        logger.info(
+                            f"[PENDING_CONFIRM] Track {str_track_id} soft-attached to "
+                            f"{res.visitor_code} after {votes[res.visitor_id]} votes "
+                            f"(sim={res.best_similarity:.3f})"
+                        )
+                        return VisitorResolutionResult(
+                            is_resolved=True,
+                            visitor_id=res.visitor_id,
+                            visitor_code=res.visitor_code,
+                            similarity=res.best_similarity,
+                            decision="EXISTING",
+                            primary_snapshot_path=res.primary_snapshot_path,
+                            reason=f"PENDING soft-confirmed to {res.visitor_code}"
+                        )
+
                 return VisitorResolutionResult(
                     is_resolved=False,
                     visitor_code="Identifying...",
@@ -465,7 +575,9 @@ class VisitorManager:
                 if faiss_manager.index.ntotal > 0 and embedding is not None:
                     hits = faiss_manager.search(query_embedding=embedding, k=5, threshold=0.35)
                     q_norm = l2_normalize(embedding)
-                    reg_thresh = getattr(settings, 'REGISTERED_CONFIRMED_THRESHOLD', 0.40)
+                    # Use the same threshold as the recognition engine to avoid dead zones
+                    # where a face is rejected by recognition but blocked from visitor creation
+                    reg_thresh = getattr(settings, 'RECOGNITION_SIMILARITY_THRESHOLD', 0.45)
                     for hit in hits:
                         pid = hit.get("person_id")
                         name = hit.get("name")
@@ -504,10 +616,54 @@ class VisitorManager:
                         primary_snapshot_path=re_res.primary_snapshot_path,
                         reason="Matched under creation lock"
                     )
+                # Also abort create if PENDING near-match appears under the lock
+                if re_res.decision == 'PENDING' and re_res.visitor_id:
+                    return VisitorResolutionResult(
+                        is_resolved=False,
+                        visitor_code="Identifying...",
+                        similarity=re_res.best_similarity,
+                        decision="PENDING",
+                        reason=f"Near-match under creation lock to {re_res.visitor_code}"
+                    )
 
-                # Select best quality sample for initial profile
-                sorted_samples = sorted(buf["samples"], key=lambda s: s["quality_score"], reverse=True)
+                # Prefer enrollment-quality samples for primary profile; require enough best frames
+                min_obs = int(getattr(settings, 'VISITOR_MIN_OBSERVATIONS_FOR_NEW', 6))
+                enrollment_samples = [
+                    s for s in buf["samples"]
+                    if s.get("quality_result")
+                    and getattr(s["quality_result"], "usable_for_new_identity", False)
+                    and s.get("crop") is not None
+                    and s.get("embedding") is not None
+                ]
+                if len(enrollment_samples) < min_obs:
+                    return VisitorResolutionResult(
+                        is_resolved=False,
+                        visitor_code="Identifying...",
+                        similarity=res.best_similarity,
+                        decision="COLLECTING",
+                        reason=f"Need {min_obs} best-quality frames (have {len(enrollment_samples)}) — not saving visitor"
+                    )
+
+                sorted_samples = sorted(
+                    enrollment_samples,
+                    key=lambda s: (
+                        1 if getattr(s.get("quality_result"), "usable_for_primary_avatar", False) else 0,
+                        s["quality_score"]
+                    ),
+                    reverse=True
+                )
+                # Persist only the best N enrollment frames
+                sorted_samples = sorted_samples[:max(min_obs, 6)]
                 best_sample = sorted_samples[0]
+                min_best_q = float(getattr(settings, 'VISITOR_MIN_BEST_FRAME_QUALITY', 0.68))
+                if float(best_sample.get("quality_score", 0.0)) < min_best_q:
+                    return VisitorResolutionResult(
+                        is_resolved=False,
+                        visitor_code="Identifying...",
+                        similarity=res.best_similarity,
+                        decision="COLLECTING",
+                        reason=f"Best frame quality {best_sample['quality_score']:.3f} < {min_best_q:.3f} — not saving"
+                    )
 
                 # Create New Visitor record in DB
                 visitor = visitor_repository.create_visitor(
@@ -516,13 +672,25 @@ class VisitorManager:
                     primary_crop=None
                 )
 
-                # Add embedding to RAM visitor_gallery instantly
-                visitor_gallery.add_visitor_sample(
-                    visitor_id=visitor.id,
-                    visitor_code=visitor.visitor_code,
-                    embedding=best_sample["embedding"],
-                    snapshot_path=None
-                )
+                # Seed RAM gallery with multiple best embeddings immediately
+                seeded = 0
+                for sample in sorted_samples[:6]:
+                    if sample.get("embedding") is None:
+                        continue
+                    visitor_gallery.add_visitor_sample(
+                        visitor_id=visitor.id,
+                        visitor_code=visitor.visitor_code,
+                        embedding=sample["embedding"],
+                        snapshot_path=None
+                    )
+                    seeded += 1
+                if seeded == 0:
+                    visitor_gallery.add_visitor_sample(
+                        visitor_id=visitor.id,
+                        visitor_code=visitor.visitor_code,
+                        embedding=best_sample["embedding"],
+                        snapshot_path=None
+                    )
 
                 # Lock track identity
                 self.track_identity_cache[cache_key] = {

@@ -115,7 +115,20 @@ export interface RecognitionDateItem {
 
 const apiClient = axios.create({
   baseURL: '/api',
+  timeout: 8000,
 })
+
+apiClient.interceptors.response.use(
+  response => response,
+  error => {
+    if (axios.isCancel(error)) {
+      return Promise.reject(error)
+    }
+    console.warn('[API Client Warning]:', error?.message || error)
+    return Promise.reject(error)
+  }
+)
+
 
 export async function getHealth(): Promise<HealthData> {
   const response = await apiClient.get('/health')
@@ -289,6 +302,7 @@ export interface VisitorItem {
   sighting_count: number
   status: string
   promoted_person_id?: string
+  merged_from_codes?: string[]
   primary_snapshot_url?: string
 }
 
@@ -361,6 +375,50 @@ export async function getVisitorTimeline(visitorId: number, dateKey?: string): P
   return res.data.data
 }
 
+export async function getPromotePreview(visitorId: number): Promise<PromotePreview> {
+  const res = await apiClient.get(`/visitors/${visitorId}/promote-preview`)
+  return res.data.data
+}
+
+export interface PromotePreviewSample {
+  id: number
+  visitor_id?: number
+  visitor_code?: string
+  quality_score: number
+  blur_score: number
+  yaw: number
+  pitch: number
+  camera_id: string
+  snapshot_url?: string
+}
+
+export interface PromotePreviewMatchedPerson {
+  person_id: string
+  name: string
+  similarity: number
+  match_level?: 'none' | 'soft' | 'hard'
+  first_name?: string
+  last_name?: string
+  department?: string
+  role?: string
+  phone?: string
+  email?: string
+  existing_images: { id: number; image_url: string; quality_score: number }[]
+  existing_image_count: number
+}
+
+export interface PromotePreview {
+  visitor_id: number
+  visitor_code: string
+  primary_snapshot_url?: string
+  samples_to_transfer: PromotePreviewSample[]
+  sample_count: number
+  matched_registered_person?: PromotePreviewMatchedPerson | null
+  match_level?: 'none' | 'soft' | 'hard'
+  can_create_new: boolean
+  can_merge_existing: boolean
+}
+
 export async function promoteVisitor(visitorId: number, payload: {
   first_name: string
   last_name: string
@@ -369,8 +427,78 @@ export async function promoteVisitor(visitorId: number, payload: {
   phone?: string
   email?: string
   notes?: string
+  merge_into_existing?: boolean
+  target_person_id?: string
+  additional_visitor_ids?: number[]
 }): Promise<any> {
   const res = await apiClient.post(`/visitors/${visitorId}/promote`, payload)
+  return res.data
+}
+
+export interface BulkPromotePreviewVisitor {
+  visitor_id: number
+  visitor_code: string
+  primary_snapshot_url?: string
+  samples: PromotePreviewSample[]
+  sample_count: number
+  status: string
+}
+
+export interface BulkPromotePairwiseSimilarity {
+  visitor_a_id: number
+  visitor_a_code: string
+  visitor_b_id: number
+  visitor_b_code: string
+  similarity: number
+  same_person_likely: boolean
+}
+
+export interface BulkPromotePreview {
+  visitor_ids: number[]
+  visitor_count: number
+  visitors: BulkPromotePreviewVisitor[]
+  pairwise_similarities: BulkPromotePairwiseSimilarity[]
+  min_pairwise_similarity: number
+  samples_to_transfer: PromotePreviewSample[]
+  sample_count: number
+  matched_registered_person?: PromotePreviewMatchedPerson | null
+  match_level?: 'none' | 'soft' | 'hard'
+  can_create_new: boolean
+  can_merge_existing: boolean
+}
+
+export async function getBulkPromotePreview(visitorIds: number[]): Promise<BulkPromotePreview> {
+  const res = await apiClient.post('/visitors/bulk-promote-preview', { visitor_ids: visitorIds })
+  return res.data.data
+}
+
+export async function bulkPromoteVisitors(payload: {
+  visitor_ids: number[]
+  primary_visitor_id?: number
+  first_name: string
+  last_name: string
+  department?: string
+  role?: string
+  phone?: string
+  email?: string
+  notes?: string
+  merge_into_existing?: boolean
+  target_person_id?: string
+}): Promise<any> {
+  const res = await apiClient.post('/visitors/bulk-promote', payload)
+  return res.data
+}
+
+export async function getMergePreview(visitorIds: number[]): Promise<BulkPromotePreview> {
+  const res = await apiClient.post('/visitors/merge-preview', { visitor_ids: visitorIds })
+  return res.data.data
+}
+
+export async function mergeVisitors(payload: {
+  visitor_ids: number[]
+  primary_visitor_id?: number
+}): Promise<any> {
+  const res = await apiClient.post('/visitors/merge', payload)
   return res.data
 }
 

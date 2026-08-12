@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
+
 import {
   Users,
   Eye,
@@ -17,7 +18,10 @@ import {
   RotateCcw,
   FileSpreadsheet,
   FileDown,
-  Loader2
+  Loader2,
+  CheckSquare,
+  Square,
+  GitMerge
 } from 'lucide-react'
 
 import { TopBar } from '../components/TopBar'
@@ -35,6 +39,7 @@ import {
 } from '../lib/api'
 import type { VisitorItem, VisitorStats, VisitorDateItem, VisitorTimelineResponse, VisitorSampleSnapshot, CameraConfig } from '../lib/api'
 import { VisitorPromotionModal } from '../components/visitors/VisitorPromotionModal'
+import { VisitorMergeModal } from '../components/visitors/VisitorMergeModal'
 import { toast } from '../components/ui/Toast'
 import clsx from 'clsx'
 
@@ -134,6 +139,9 @@ export function VisitorTracking() {
 
   // Modal & Actions
   const [promoteModalOpen, setPromoteModalOpen] = useState(false)
+  const [mergeModalOpen, setMergeModalOpen] = useState(false)
+  const [promoteVisitorIds, setPromoteVisitorIds] = useState<number[]>([])
+  const [checkedVisitorIds, setCheckedVisitorIds] = useState<number[]>([])
   const [deleting, setDeleting] = useState(false)
   const [purging, setPurging] = useState(false)
   const [exporting, setExporting] = useState<'csv' | 'pdf' | null>(null)
@@ -198,8 +206,10 @@ export function VisitorTracking() {
     }
   }
 
-  const loadData = async () => {
-    setLoading(true)
+  const loadData = useCallback(async (showSpinner = false) => {
+    if (showSpinner) {
+      setLoading(true)
+    }
     try {
       const [datesData, statsData, visitorsData, camsData] = await Promise.all([
         getVisitorDates(),
@@ -208,34 +218,42 @@ export function VisitorTracking() {
         getCameras()
       ])
 
-      setDates(datesData)
-      setStats(statsData)
-      setVisitors(visitorsData.visitors)
-      setCameras(camsData)
+      setDates(datesData || [])
+      setStats(statsData || null)
+      setVisitors(visitorsData?.visitors || [])
+      setCameras(camsData || [])
 
-      if (!selectedDateKey && datesData.length > 0) {
+      const fetchedVisitors = visitorsData?.visitors || []
+
+      if (!selectedDateKey && datesData && datesData.length > 0) {
         const todayItem = datesData.find(d => d.is_today) || datesData[0]
         if (todayItem) setSelectedDateKey(todayItem.date_key)
       }
 
-      if (visitorsData.visitors.length > 0) {
-        if (!selectedVisitorId || !visitorsData.visitors.some(v => v.id === selectedVisitorId)) {
-          setSelectedVisitorId(visitorsData.visitors[0].id)
-        }
+      if (fetchedVisitors.length > 0) {
+        setSelectedVisitorId(prev => {
+          if (!prev || !fetchedVisitors.some(v => v.id === prev)) {
+            return fetchedVisitors[0].id
+          }
+          return prev
+        })
       } else {
         setSelectedVisitorId(null)
       }
     } catch (err) {
-      console.error(err)
-      toast.error('Load Error', 'Failed to load visitor tracking data.')
+      console.error('[VisitorTracking loadData Error]:', err)
     } finally {
       setLoading(false)
     }
-  }
+  }, [selectedDateKey, search, cameraFilter, statusFilter])
 
   useEffect(() => {
-    loadData()
-  }, [selectedDateKey, search, cameraFilter, statusFilter])
+    loadData(true)
+    const interval = setInterval(() => loadData(false), 8000)
+    return () => clearInterval(interval)
+  }, [loadData])
+
+
 
   useEffect(() => {
     if (!selectedVisitorId) {
@@ -265,6 +283,50 @@ export function VisitorTracking() {
 
 
   const selectedVisitor = visitors.find(v => v.id === selectedVisitorId)
+
+  const toggleVisitorCheck = (visitorId: number, e?: React.MouseEvent) => {
+    e?.stopPropagation()
+    setCheckedVisitorIds(prev =>
+      prev.includes(visitorId)
+        ? prev.filter(id => id !== visitorId)
+        : [...prev, visitorId]
+    )
+  }
+
+  const openMergeModal = (ids: number[]) => {
+    const eligible = ids.filter(id => {
+      const v = visitors.find(x => x.id === id)
+      return v && v.status === 'active'
+    })
+    if (eligible.length < 2) {
+      toast.error('Cannot Merge', 'Select at least two active (unregistered) visitors.')
+      return
+    }
+    setPromoteVisitorIds(eligible)
+    setMergeModalOpen(true)
+  }
+
+  const openPromoteModal = (ids: number[]) => {
+    const eligible = ids.filter(id => {
+      const v = visitors.find(x => x.id === id)
+      return v && v.status !== 'promoted'
+    })
+    if (eligible.length === 0) {
+      toast.error('Cannot Register', 'Selected visitors are already registered or invalid.')
+      return
+    }
+    setPromoteVisitorIds(eligible)
+    setPromoteModalOpen(true)
+  }
+
+  const promoteModalVisitors = promoteVisitorIds
+    .map(id => visitors.find(v => v.id === id))
+    .filter(Boolean) as VisitorItem[]
+
+  const checkedActiveCount = checkedVisitorIds.filter(id => {
+    const v = visitors.find(x => x.id === id)
+    return v && v.status !== 'promoted'
+  }).length
   const selectedDateLabel = selectedDateKey === 'all'
     ? 'All Dates'
     : (dates.find(d => d.date_key === selectedDateKey)?.is_today
@@ -381,10 +443,11 @@ export function VisitorTracking() {
             </select>
 
             <button
-              onClick={loadData}
+              onClick={() => loadData(true)}
               className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl transition-colors cursor-pointer"
               title="Refresh Data"
             >
+
               <RefreshCw className={clsx("w-4 h-4", loading && "animate-spin")} />
             </button>
 
@@ -430,8 +493,32 @@ export function VisitorTracking() {
           <div className="lg:col-span-5 bg-slate-900/60 border border-slate-800/80 rounded-2xl p-4 flex flex-col h-[calc(100vh-220px)] min-h-[480px] sticky top-4">
             <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-800">
               <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-400">Visitors ({visitors.length})</h2>
-              <span className="text-xs text-cyan-400 font-mono">Unregistered Identities</span>
+              <span className="text-xs text-cyan-400 font-mono">Select duplicates to merge</span>
             </div>
+
+            {checkedActiveCount >= 2 && (
+              <div className="mb-3 p-3 rounded-xl bg-violet-500/10 border border-violet-500/30 space-y-2">
+                <span className="text-xs text-violet-200 block">
+                  {checkedActiveCount} visitors selected — same person?
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => openMergeModal(checkedVisitorIds)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold transition-colors"
+                  >
+                    <GitMerge className="w-3.5 h-3.5" />
+                    Merge for Tracking
+                  </button>
+                  <button
+                    onClick={() => openPromoteModal(checkedVisitorIds)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold transition-colors"
+                  >
+                    <UserCheck className="w-3.5 h-3.5" />
+                    Register as One Person
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div className="flex-1 overflow-y-auto space-y-3 pr-1 custom-scrollbar">
               {loading ? (
@@ -446,6 +533,8 @@ export function VisitorTracking() {
               ) : (
                 visitors.map(v => {
                   const isSelected = v.id === selectedVisitorId
+                  const isChecked = checkedVisitorIds.includes(v.id)
+                  const canCheck = v.status !== 'promoted'
                   return (
                     <div
                       key={v.id}
@@ -454,10 +543,27 @@ export function VisitorTracking() {
                         "p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3",
                         isSelected
                           ? "bg-cyan-950/30 border-cyan-500/50 shadow-lg shadow-cyan-950/20"
-                          : "bg-slate-950/50 border-slate-800/80 hover:bg-slate-800/40 hover:border-slate-700"
+                          : isChecked
+                            ? "bg-violet-950/20 border-violet-500/40"
+                            : "bg-slate-950/50 border-slate-800/80 hover:bg-slate-800/40 hover:border-slate-700"
                       )}
                     >
                       <div className="flex items-center gap-3 min-w-0">
+                        {canCheck ? (
+                          <button
+                            type="button"
+                            onClick={(e) => toggleVisitorCheck(v.id, e)}
+                            className={clsx(
+                              "shrink-0 p-0.5 rounded transition-colors",
+                              isChecked ? "text-violet-400" : "text-slate-500 hover:text-slate-300"
+                            )}
+                            title={isChecked ? 'Deselect for merge' : 'Select to merge duplicates'}
+                          >
+                            {isChecked ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+                          </button>
+                        ) : (
+                          <div className="w-5" />
+                        )}
                         <VisitorAvatar
                           url={v.primary_snapshot_url}
                           code={v.visitor_code}
@@ -478,6 +584,11 @@ export function VisitorTracking() {
                             <Clock className="w-3 h-3 text-slate-500" />
                             <span>{v.first_seen_at.split(' ')[1] || v.first_seen_at} → {v.last_seen_at.split(' ')[1] || v.last_seen_at}</span>
                           </div>
+                          {v.merged_from_codes && v.merged_from_codes.length > 0 && (
+                            <p className="text-[10px] text-violet-400 mt-1">
+                              Includes: {v.merged_from_codes.join(', ')}
+                            </p>
+                          )}
                         </div>
                       </div>
 
@@ -529,6 +640,12 @@ export function VisitorTracking() {
                             <Calendar className="w-3.5 h-3.5 text-slate-500" />
                             <span>Date Key: <strong className="text-slate-200 font-mono">{dateKeyToDisplayDate(selectedVisitor.date_key)}</strong></span>
                           </div>
+                          {selectedVisitor.merged_from_codes && selectedVisitor.merged_from_codes.length > 0 && (
+                            <div className="flex items-center gap-1.5 text-violet-400">
+                              <GitMerge className="w-3.5 h-3.5" />
+                              <span>Merged from: <strong>{selectedVisitor.merged_from_codes.join(', ')}</strong></span>
+                            </div>
+                          )}
                           <div className="flex items-center gap-1.5">
                             <Clock className="w-3.5 h-3.5 text-slate-500" />
                             <span>First: <strong className="text-slate-200">{selectedVisitor.first_seen_at}</strong></span>
@@ -544,11 +661,19 @@ export function VisitorTracking() {
                     <div className="flex flex-wrap items-center gap-3 shrink-0">
                       {selectedVisitor.status !== 'promoted' ? (
                         <button
-                          onClick={() => setPromoteModalOpen(true)}
+                          onClick={() => openPromoteModal(
+                            checkedVisitorIds.includes(selectedVisitor.id) && checkedActiveCount >= 2
+                              ? checkedVisitorIds
+                              : [selectedVisitor.id]
+                          )}
                           className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-medium text-sm shadow-lg shadow-cyan-500/20 transition-all cursor-pointer"
                         >
                           <UserCheck className="w-4 h-4" />
-                          <span>Register Person</span>
+                          <span>
+                            {checkedVisitorIds.includes(selectedVisitor.id) && checkedActiveCount >= 2
+                              ? `Register ${checkedActiveCount} as One Person`
+                              : 'Register Person'}
+                          </span>
                         </button>
                       ) : (
                         <div className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold">
@@ -713,14 +838,40 @@ export function VisitorTracking() {
       </main>
 
       {/* Visitor Promotion Modal */}
-      {selectedVisitor && (
+      {promoteModalVisitors.length > 0 && (
         <VisitorPromotionModal
-          visitorId={selectedVisitor.id}
-          visitorCode={selectedVisitor.visitor_code}
-          primarySnapshotUrl={selectedVisitor.primary_snapshot_url}
+          visitorIds={promoteModalVisitors.map(v => v.id)}
+          visitorCodes={promoteModalVisitors.map(v => v.visitor_code)}
+          primarySnapshotUrl={promoteModalVisitors[0]?.primary_snapshot_url}
           isOpen={promoteModalOpen}
-          onClose={() => setPromoteModalOpen(false)}
-          onSuccess={loadData}
+          onClose={() => {
+            setPromoteModalOpen(false)
+            setPromoteVisitorIds([])
+          }}
+          onSuccess={() => {
+            setCheckedVisitorIds([])
+            setPromoteVisitorIds([])
+            loadData()
+          }}
+        />
+      )}
+
+      {promoteModalVisitors.length >= 2 && (
+        <VisitorMergeModal
+          visitorIds={promoteModalVisitors.map(v => v.id)}
+          visitorCodes={promoteModalVisitors.map(v => v.visitor_code)}
+          primaryVisitorId={promoteModalVisitors[0]?.id}
+          isOpen={mergeModalOpen}
+          onClose={() => {
+            setMergeModalOpen(false)
+            setPromoteVisitorIds([])
+          }}
+          onSuccess={(primaryId) => {
+            setCheckedVisitorIds([])
+            setPromoteVisitorIds([])
+            setSelectedVisitorId(primaryId)
+            loadData()
+          }}
         />
       )}
     </div>

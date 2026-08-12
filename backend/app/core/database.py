@@ -1,18 +1,33 @@
 import logging
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, event
 from sqlalchemy.orm import sessionmaker
 from app.config import settings
 # pyrefly: ignore [missing-import]
 from app.models.db_models import Base
+
 
 logger = logging.getLogger(__name__)
 
 # Engine setup
 engine = create_engine(
     settings.DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}
+    connect_args={"check_same_thread": False, "timeout": 15} if "sqlite" in settings.DATABASE_URL else {}
 )
+
+@event.listens_for(engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    if "sqlite" in settings.DATABASE_URL:
+        try:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.close()
+        except Exception as pragma_err:
+            logger.warning(f"Error setting SQLite WAL pragma: {pragma_err}")
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
 
 def auto_migrate():
     """Auto-migrates existing database tables by adding missing enterprise columns."""
@@ -99,6 +114,8 @@ def auto_migrate():
             if v_cols:
                 if "created_date" not in v_cols:
                     conn.execute(text("ALTER TABLE visitors ADD COLUMN created_date VARCHAR(20)"))
+                if "merged_into_visitor_id" not in v_cols:
+                    conn.execute(text("ALTER TABLE visitors ADD COLUMN merged_into_visitor_id INTEGER"))
                 conn.commit()
 
             # 5. Migrate visitor_face_samples table

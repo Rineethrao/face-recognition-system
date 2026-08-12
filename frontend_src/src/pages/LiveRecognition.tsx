@@ -45,7 +45,7 @@ function latestEventsByPerson(events: RecognitionEvent[]): RecognitionEvent[] {
 
 function RecognitionCard({ event, nowMs }: { event: RecognitionEvent; nowMs: number }) {
   const isUnknown = event.person_id === 'unknown'
-  const isVisitor = (event.person_id || '').startsWith('VISITOR-') || (event.name || '').startsWith('VISITOR-')
+  const isVisitor = (event.person_id || '').toUpperCase().startsWith('VISITOR') || (event.name || '').toUpperCase().startsWith('VISITOR')
 
   const [imgSrc, setImgSrc] = useState<string>(() => {
     if (isUnknown) return ''
@@ -58,11 +58,15 @@ function RecognitionCard({ event, nowMs }: { event: RecognitionEvent; nowMs: num
     }
     if (isVisitor) {
       const code = event.person_id || event.name || ''
-      const parts = code.split('-')
+      const parts = code.split(/[-_]/)
       if (parts.length >= 2) {
-        const dateKey = parts[1]
-        return `/faces/visitors/${dateKey}/${code}/primary_avatar.jpg`
+        // If YYYYMMDD date key exists in the code (e.g., VISITOR-20260810-026)
+        if (parts[1].length === 8 && /^\d+$/.test(parts[1])) {
+          return `/faces/visitors/${parts[1]}/${code}/primary_avatar.jpg`
+        }
       }
+      // Fallback for VISITOR_XXX format: query using current operational date or fallback
+      // Since backend serves resolve_visitor_primary_snapshot_url, event.face_snapshot_url is normally present.
     }
     return `/faces/${event.person_id}/sample_1_frontal.jpg`
   })

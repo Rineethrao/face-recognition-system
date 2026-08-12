@@ -358,6 +358,13 @@ class FaceRegistrationService:
         person = db.query(PersonModel).filter(PersonModel.person_id == person_id).first()
         if person:
             db.query(RecognitionLogModel).filter(RecognitionLogModel.person_id == person_id).delete()
+            try:
+                from app.models.presence import PresenceModel, PresenceLogModel
+                db.query(PresenceLogModel).filter(PresenceLogModel.person_id == person_id).delete()
+                db.query(PresenceModel).filter(PresenceModel.person_id == person_id).delete()
+            except Exception:
+                pass
+
             db.delete(person)
             db.commit()
 
@@ -366,8 +373,19 @@ class FaceRegistrationService:
             person_dir = settings.FACES_DIR / person_id
             if person_dir.exists():
                 shutil.rmtree(person_dir, ignore_errors=True)
+
+            try:
+                from app.services.camera.camera_registry import camera_registry
+                with camera_registry.lock:
+                    for w in camera_registry.workers.values():
+                        if hasattr(w, "orchestrator") and w.orchestrator:
+                            w.orchestrator.reset_track_recognitions()
+            except Exception:
+                pass
+
             return True
         return False
+
 
 registration_service = FaceRegistrationService()
 registration_engine = registration_service

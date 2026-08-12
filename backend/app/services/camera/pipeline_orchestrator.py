@@ -43,7 +43,8 @@ class TrackState:
     __slots__ = [
         'track_id', 'first_seen', 'last_seen', 'frames_collected',
         'best_frame', 'best_landmarks', 'best_bbox', 'best_quality_est',
-        'recognition_attempted', 'final_match', 'current_bbox', 'current_landmarks'
+        'best_det_score', 'recognition_attempted', 'final_match',
+        'current_bbox', 'current_landmarks'
     ]
 
     def __init__(self, track_id: int):
@@ -55,6 +56,7 @@ class TrackState:
         self.best_landmarks: Optional[np.ndarray] = None
         self.best_bbox: Optional[List[float]] = None
         self.best_quality_est: float = -1.0
+        self.best_det_score: float = 0.0
         self.recognition_attempted: bool = False
         self.final_match: Optional[Dict[str, Any]] = None
         # Updated every detection frame for overlay rendering
@@ -331,9 +333,19 @@ class PipelineOrchestrator:
                         if not state.recognition_attempted:
                             x1, y1, x2, y2 = face.bbox
                             face_size = min(max(0, x2 - x1), max(0, y2 - y1))
+                            det_score = float(getattr(face, 'score', 0.0) or 0.0)
+                            min_face = getattr(settings, 'VISITOR_MIN_FACE_WIDTH', 28)
 
-                            # Face size gate: minimum 22px (allows distant CCTV office faces)
-                            if face_size >= getattr(settings, 'VISITOR_MIN_FACE_WIDTH', 22):
+                            # Prefer real faces: size + detection confidence + landmark geometry
+                            # Do NOT reward extreme Laplacian (textured shelves inflate blur).
+                            if face_size >= min_face and det_score >= getattr(settings, 'VISITOR_MIN_DET_SCORE', 0.50) * 0.85:
+                                from app.core.utils import validate_landmark_geometry
+                                geom_ok, structure_score, _ = validate_landmark_geometry(
+                                    face.landmarks, face.bbox
+                                )
+                                if not geom_ok:
+                                    structure_score = 0.0
+
                                 ih, iw = frame.shape[:2]
                                 cx1 = int(max(0, x1)); cy1 = int(max(0, y1))
                                 cx2 = int(min(iw, x2)); cy2 = int(min(ih, y2))
@@ -344,12 +356,28 @@ class PipelineOrchestrator:
                                 else:
                                     blur = 0.0
 
-                                quality_est = face_size * blur
+                                # Cap blur contribution so over-textured non-faces lose
+                                max_blur = float(getattr(settings, 'VISITOR_MAX_BLUR_SCORE', 800.0))
+                                blur_norm = min(blur, 250.0) / 250.0
+                                if blur > max_blur:
+                                    blur_norm *= 0.2
+
+                                size_norm = min(face_size / 120.0, 1.0)
+                                quality_est = (
+                                    0.40 * structure_score +
+                                    0.30 * det_score +
+                                    0.20 * size_norm +
+                                    0.10 * blur_norm
+                                )
+                                if structure_score < 0.35:
+                                    quality_est *= 0.25
+
                                 if quality_est > state.best_quality_est or state.best_frame is None:
                                     state.best_quality_est = quality_est
                                     state.best_frame = frame.copy()
                                     state.best_landmarks = np.array(face.landmarks)
                                     state.best_bbox = face.bbox
+                                    state.best_det_score = det_score
                                     new_unrecognized = True
 
                                 state.frames_collected += 1
@@ -518,15 +546,19 @@ class PipelineOrchestrator:
                     if state.recognition_attempted:
                         continue
                     if state.best_frame is not None:
-                        candidates.append((tid, state.best_frame, state.best_bbox, state.best_landmarks))
+                        candidates.append((
+                            tid, state.best_frame, state.best_bbox,
+                            state.best_landmarks, state.best_det_score
+                        ))
                         state.best_frame = None  # Reset best frame so next observation can be picked up
                         state.best_quality_est = 0.0
 
-            for tid, best_frame, best_box, best_lms in candidates:
+            for tid, best_frame, best_box, best_lms, best_det in candidates:
                 try:
                     match_info = self._run_recognition(
                         tid, best_frame, best_box, best_lms,
-                        arcface_recognizer, faiss_manager, l2_normalize, align_face
+                        arcface_recognizer, faiss_manager, l2_normalize, align_face,
+                        det_score=best_det
                     )
 
                     with self._track_lock:
@@ -550,13 +582,15 @@ class PipelineOrchestrator:
                         if state:
                             state.final_match = {"person_id": "unknown", "name": "Identifying...", "similarity": 0.0}
 
-    def _run_recognition(self, track_id, frame, bbox, landmarks, arcface, faiss_mgr, l2_normalize_fn, align_fn) -> Dict[str, Any]:
+    def _run_recognition(self, track_id, frame, bbox, landmarks, arcface, faiss_mgr, l2_normalize_fn, align_fn, det_score: float = 0.90) -> Dict[str, Any]:
         """Quality gate → ArcFace embedding → FAISS registered search (if active) → VisitorManager."""
         t0 = time.perf_counter()
         from app.visitors.face_quality import visitor_quality_evaluator
 
-        # Multi-Tier Face Quality Evaluation
-        quality_res = visitor_quality_evaluator.evaluate_quality(frame, bbox, landmarks)
+        # Multi-Tier Face Quality Evaluation (includes landmark geometry + det confidence)
+        quality_res = visitor_quality_evaluator.evaluate_quality(
+            frame, bbox, landmarks, det_score=float(det_score or 0.90)
+        )
 
         # POOR face quality check: If unusable for matching, DO NOT proceed to recognition!
         if not quality_res.usable_for_matching:
@@ -594,7 +628,9 @@ class PipelineOrchestrator:
                     best_pid = pid
                     best_name = name
 
-            threshold = getattr(settings, 'REGISTERED_CONFIRMED_THRESHOLD', getattr(settings, 'VISITOR_REGISTERED_MATCH_THRESHOLD', 0.40))
+            # Use RECOGNITION_SIMILARITY_THRESHOLD to align with the recognition engine
+            # and eliminate the dead zone where faces are rejected by both systems
+            threshold = getattr(settings, 'RECOGNITION_SIMILARITY_THRESHOLD', 0.45)
             if best_pid and best_sim >= threshold:
                 try:
                     from app.services.learning.progressive_learning import progressive_learning_engine

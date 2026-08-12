@@ -57,6 +57,18 @@ class FAISSIndexManager:
             self.save()
             return added_ids
 
+    def add_person_embedding(
+        self,
+        person_id: str,
+        embedding: np.ndarray,
+        name: str = "Unknown"
+    ) -> List[int]:
+        """
+        Convenience wrapper used by visitor promotion — adds one or more embeddings
+        for a registered person into the FAISS index.
+        """
+        return self.add_vectors(person_id=person_id, name=name, embeddings=embedding)
+
     def search(self, query_embedding: np.ndarray, k: int = 1, threshold: float = settings.RECOGNITION_SIMILARITY_THRESHOLD) -> List[Dict[str, Any]]:
         with self.lock:
             if self.index.ntotal == 0:

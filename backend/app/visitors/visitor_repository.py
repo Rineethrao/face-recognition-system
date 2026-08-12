@@ -461,6 +461,799 @@ class VisitorRepository:
 
         return sighting
 
+    def _collect_transferable_samples(
+        self,
+        db: Session,
+        visitor_id: int,
+        visitor: VisitorModel,
+    ) -> Tuple[List[VisitorFaceSampleModel], List[np.ndarray]]:
+        """Returns ranked visitor face samples and normalized embeddings for registration."""
+        from app.core.utils import l2_normalize
+
+        samples = (
+            db.query(VisitorFaceSampleModel)
+            .filter(VisitorFaceSampleModel.visitor_id == visitor_id)
+            .all()
+        )
+        if not samples:
+            raise ValueError(
+                f"Visitor {visitor.visitor_code} has no face samples to transfer. "
+                "Wait for clearer face captures before registering."
+            )
+
+        max_transfer = int(getattr(settings, 'VISITOR_MAX_SAMPLES', 6))
+        ranked = sorted(samples, key=lambda s: float(s.quality_score or 0.0), reverse=True)
+        transferable: List[VisitorFaceSampleModel] = []
+        emb_list: List[np.ndarray] = []
+        for s in ranked:
+            if s.embedding_blob is None:
+                continue
+            emb = np.frombuffer(s.embedding_blob, dtype=np.float32)
+            if emb.size != 512:
+                continue
+            transferable.append(s)
+            emb_list.append(l2_normalize(emb.astype(np.float32)))
+            if len(transferable) >= max_transfer:
+                break
+
+        if not transferable:
+            raise ValueError(f"Visitor {visitor.visitor_code} has no usable embeddings to register.")
+        return transferable, emb_list
+
+    def _find_duplicate_registered(
+        self,
+        emb_list: List[np.ndarray],
+    ) -> Tuple[Optional[Dict[str, Any]], float, str]:
+        """
+        Returns best registered-person match for visitor embeddings.
+        Uses the same duplicate thresholds as manual registration.
+        Returns (match_dict_or_none, similarity, level) where level is none|soft|hard.
+        """
+        from app.services.registration.duplicate_service import duplicate_service
+
+        assessment = duplicate_service.assess_duplicate(
+            emb_list,
+            hard_threshold=float(getattr(settings, 'VISITOR_REGISTERED_MATCH_THRESHOLD', 0.55)),
+            warning_threshold=float(getattr(settings, 'REGISTRATION_DUPLICATE_WARNING_THRESHOLD', 0.52)),
+        )
+        level = str(assessment.get("level") or "none")
+        sim = float(assessment.get("similarity") or 0.0)
+        pid = assessment.get("matched_person_id")
+        if level == "none" or not pid:
+            return None, sim, level
+
+        return {
+            "person_id": pid,
+            "name": assessment.get("matched_name") or pid,
+            "similarity": sim,
+        }, sim, level
+
+    def _transfer_samples_to_person(
+        self,
+        db: Session,
+        person: PersonModel,
+        visitor: VisitorModel,
+        transferable: List[VisitorFaceSampleModel],
+        *,
+        skip_near_duplicate: bool = True,
+    ) -> int:
+        """
+        Copies visitor face sample images + embeddings into a registered person gallery.
+        Returns number of samples actually added.
+        """
+        from app.core.faiss_index import faiss_manager
+        from app.core.utils import l2_normalize
+
+        person_id = person.person_id
+        person_dir = settings.FACES_DIR / person_id
+        os.makedirs(person_dir, exist_ok=True)
+        now = datetime.now()
+
+        existing_count = (
+            db.query(PersonImageModel)
+            .filter(PersonImageModel.person_id == person_id, PersonImageModel.is_active == True)
+            .count()
+        )
+        max_gallery = int(getattr(settings, 'REGISTRATION_MAX_SAMPLES', 10))
+        dup_sim_thresh = float(getattr(settings, 'VISITOR_PROFILE_UPDATE_THRESHOLD', 0.65))
+        cached = faiss_manager.embeddings_cache.get(person_id, [])
+
+        prepared = []
+        for idx, sample in enumerate(transferable):
+            emb_vec = np.frombuffer(sample.embedding_blob, dtype=np.float32)
+            if emb_vec.size != 512:
+                continue
+            emb_norm = l2_normalize(emb_vec.astype(np.float32))
+
+            if skip_near_duplicate and cached:
+                max_sim = max(float(np.dot(emb_norm, l2_normalize(c))) for c in cached)
+                if max_sim >= dup_sim_thresh:
+                    continue
+
+            dest_filename = f"{person_id}_from_{visitor.visitor_code}_{idx+1}.jpg"
+            dest_img_path = str(person_dir / dest_filename)
+            if sample.snapshot_path and os.path.exists(sample.snapshot_path):
+                import shutil
+                shutil.copy2(sample.snapshot_path, dest_img_path)
+            elif visitor.primary_snapshot_path and os.path.exists(visitor.primary_snapshot_path) and idx == 0:
+                import shutil
+                shutil.copy2(visitor.primary_snapshot_path, dest_img_path)
+            else:
+                dest_img_path = None
+
+            prepared.append((emb_norm, dest_img_path, sample))
+
+        if existing_count + len(prepared) > max_gallery:
+            prepared = prepared[: max(0, max_gallery - existing_count)]
+
+        if not prepared:
+            return 0
+
+        embeddings_matrix = np.vstack([p[0] for p in prepared]).astype(np.float32)
+        faiss_ids = faiss_manager.add_vectors(person_id, person.name or person_id, embeddings_matrix)
+        person.gallery_version = int(person.gallery_version or 1) + 1
+
+        added = 0
+        for (emb_vec, dest_img_path, sample), f_id in zip(prepared, faiss_ids):
+            p_img = PersonImageModel(
+                person_id=person_id,
+                image_path=dest_img_path,
+                quality_score=sample.quality_score,
+                pose_bin="FRONTAL",
+                gallery_version=person.gallery_version,
+                is_active=True,
+                created_at=now,
+                camera_id=sample.camera_id,
+                yaw=sample.yaw,
+                pitch=sample.pitch,
+                blur_score=sample.blur_score,
+            )
+            db.add(p_img)
+            db.flush()
+
+            emb_model = EmbeddingModel(
+                person_id=person_id,
+                faiss_id=f_id,
+                image_id=p_img.id,
+                image_path=dest_img_path,
+                gallery_version=person.gallery_version,
+                is_active=True,
+                created_at=now,
+            )
+            db.add(emb_model)
+            cached.append(emb_vec)
+            added += 1
+
+        person.updated_at = now
+        return added
+
+    def _link_duplicate_visitors_to_person(
+        self,
+        db: Session,
+        visitor_id: int,
+        visitor: VisitorModel,
+        person_id: str,
+        probe_emb: np.ndarray,
+        full_name: str,
+    ) -> None:
+        from app.core.utils import l2_normalize
+        from app.visitors.visitor_gallery import visitor_gallery
+
+        try:
+            merge_thresh = float(getattr(settings, 'VISITOR_DUPLICATE_FLAG_THRESHOLD', 0.48))
+            probe = l2_normalize(probe_emb.astype(np.float32))
+            other_visitors = (
+                db.query(VisitorModel)
+                .filter(
+                    VisitorModel.id != visitor_id,
+                    VisitorModel.status != 'promoted',
+                    VisitorModel.date_key == visitor.date_key,
+                )
+                .all()
+            )
+            for ov in other_visitors:
+                ov_samples = (
+                    db.query(VisitorFaceSampleModel)
+                    .filter(VisitorFaceSampleModel.visitor_id == ov.id)
+                    .all()
+                )
+                best_sim = 0.0
+                for osamp in ov_samples:
+                    if not osamp.embedding_blob:
+                        continue
+                    oe = np.frombuffer(osamp.embedding_blob, dtype=np.float32)
+                    if oe.size != 512:
+                        continue
+                    best_sim = max(best_sim, float(np.dot(probe, l2_normalize(oe))))
+                if best_sim >= merge_thresh:
+                    ov.status = 'promoted'
+                    ov.promoted_person_id = person_id
+                    try:
+                        visitor_gallery.remove_visitor(ov.id)
+                    except Exception:
+                        pass
+                    logger.info(
+                        f"[VisitorRepo] Linked duplicate visitor {ov.visitor_code} "
+                        f"(sim={best_sim:.3f}) to registered {full_name}"
+                    )
+        except Exception as merge_err:
+            logger.warning(f"[VisitorRepo] Duplicate visitor link step skipped: {merge_err}")
+
+    def get_promote_preview(self, db: Session, visitor_id: int) -> Dict[str, Any]:
+        """Preview visitor registration: samples to transfer + any existing registered match."""
+        from app.core.utils import l2_normalize
+
+        visitor = db.query(VisitorModel).filter(VisitorModel.id == visitor_id).first()
+        if not visitor:
+            raise ValueError(f"Visitor ID {visitor_id} not found.")
+
+        transferable, emb_list = self._collect_transferable_samples(db, visitor_id, visitor)
+        best_dup, best_dup_sim, match_level = self._find_duplicate_registered(emb_list)
+
+        visitor_samples = []
+        for s in transferable:
+            visitor_samples.append({
+                "id": s.id,
+                "quality_score": round(float(s.quality_score or 0.0), 4),
+                "blur_score": round(float(s.blur_score or 0.0), 1),
+                "yaw": round(float(s.yaw or 0.0), 3),
+                "pitch": round(float(s.pitch or 0.0), 3),
+                "camera_id": s.camera_id,
+                "snapshot_url": self._format_person_or_visitor_url(s.snapshot_path),
+            })
+
+        matched_person = None
+        if best_dup:
+            pid = best_dup.get("person_id")
+            person = db.query(PersonModel).filter(PersonModel.person_id == pid).first()
+            existing_images = []
+            if person:
+                for img in person.images:
+                    if not img.is_active:
+                        continue
+                    if not img.image_path or not os.path.exists(img.image_path):
+                        continue
+                    filename = os.path.basename(img.image_path)
+                    existing_images.append({
+                        "id": img.id,
+                        "image_url": f"/faces/{pid}/{filename}",
+                        "quality_score": round(float(img.quality_score or 0.0), 4),
+                    })
+            matched_person = {
+                "person_id": pid,
+                "name": best_dup.get("name") or (person.name if person else pid),
+                "similarity": round(best_dup_sim, 4),
+                "match_level": match_level,
+                "first_name": person.first_name if person else None,
+                "last_name": person.last_name if person else None,
+                "department": person.department if person else None,
+                "role": person.role if person else None,
+                "phone": person.phone if person else None,
+                "email": person.email if person else None,
+                "existing_images": existing_images[:8],
+                "existing_image_count": len(existing_images),
+            }
+
+        is_hard_match = match_level == "hard"
+        return {
+            "visitor_id": visitor_id,
+            "visitor_code": visitor.visitor_code,
+            "primary_snapshot_url": self._format_person_or_visitor_url(visitor.primary_snapshot_path),
+            "samples_to_transfer": visitor_samples,
+            "sample_count": len(visitor_samples),
+            "matched_registered_person": matched_person,
+            "match_level": match_level,
+            "can_create_new": not is_hard_match,
+            "can_merge_existing": is_hard_match,
+        }
+
+    @staticmethod
+    def _max_cross_similarity(embs_a: List[np.ndarray], embs_b: List[np.ndarray]) -> float:
+        if not embs_a or not embs_b:
+            return 0.0
+        best = 0.0
+        for a in embs_a:
+            for b in embs_b:
+                best = max(best, float(np.dot(a, b)))
+        return best
+
+    def _format_visitor_samples(
+        self,
+        visitor: VisitorModel,
+        transferable: List[VisitorFaceSampleModel],
+    ) -> List[Dict[str, Any]]:
+        samples = []
+        for s in transferable:
+            samples.append({
+                "id": s.id,
+                "visitor_id": visitor.id,
+                "visitor_code": visitor.visitor_code,
+                "quality_score": round(float(s.quality_score or 0.0), 4),
+                "blur_score": round(float(s.blur_score or 0.0), 1),
+                "yaw": round(float(s.yaw or 0.0), 3),
+                "pitch": round(float(s.pitch or 0.0), 3),
+                "camera_id": s.camera_id,
+                "snapshot_url": self._format_person_or_visitor_url(s.snapshot_path),
+            })
+        return samples
+
+    def get_bulk_promote_preview(self, db: Session, visitor_ids: List[int]) -> Dict[str, Any]:
+        """Preview merging multiple duplicate visitors into one registered person."""
+        if not visitor_ids:
+            raise ValueError("Select at least one visitor to register.")
+        if len(visitor_ids) < 2:
+            raise ValueError("Select at least two visitors to merge into one registered person.")
+
+        unique_ids: List[int] = []
+        seen = set()
+        for vid in visitor_ids:
+            if vid not in seen:
+                unique_ids.append(vid)
+                seen.add(vid)
+
+        visitors_bundle: List[Tuple[VisitorModel, List[VisitorFaceSampleModel], List[np.ndarray]]] = []
+        all_embs: List[np.ndarray] = []
+        visitors_info: List[Dict[str, Any]] = []
+        combined_samples: List[Dict[str, Any]] = []
+
+        for vid in unique_ids:
+            visitor = db.query(VisitorModel).filter(VisitorModel.id == vid).first()
+            if not visitor:
+                raise ValueError(f"Visitor ID {vid} not found.")
+            if visitor.status == 'promoted':
+                raise ValueError(
+                    f"{visitor.visitor_code} is already registered "
+                    f"as {visitor.promoted_person_id}. Remove it from selection."
+                )
+            transferable, emb_list = self._collect_transferable_samples(db, vid, visitor)
+            visitors_bundle.append((visitor, transferable, emb_list))
+            all_embs.extend(emb_list)
+            formatted = self._format_visitor_samples(visitor, transferable)
+            visitors_info.append({
+                "visitor_id": visitor.id,
+                "visitor_code": visitor.visitor_code,
+                "primary_snapshot_url": self._format_person_or_visitor_url(visitor.primary_snapshot_path),
+                "samples": formatted,
+                "sample_count": len(formatted),
+                "status": visitor.status,
+            })
+            combined_samples.extend(formatted)
+
+        pairwise: List[Dict[str, Any]] = []
+        for i in range(len(visitors_bundle)):
+            for j in range(i + 1, len(visitors_bundle)):
+                va, _, embs_a = visitors_bundle[i]
+                vb, _, embs_b = visitors_bundle[j]
+                sim = self._max_cross_similarity(embs_a, embs_b)
+                pairwise.append({
+                    "visitor_a_id": va.id,
+                    "visitor_a_code": va.visitor_code,
+                    "visitor_b_id": vb.id,
+                    "visitor_b_code": vb.visitor_code,
+                    "similarity": round(sim, 4),
+                    "same_person_likely": sim >= float(
+                        getattr(settings, 'VISITOR_DUPLICATE_FLAG_THRESHOLD', 0.48)
+                    ),
+                })
+
+        best_dup, best_dup_sim, match_level = self._find_duplicate_registered(all_embs)
+        matched_person = None
+        if best_dup:
+            pid = best_dup.get("person_id")
+            person = db.query(PersonModel).filter(PersonModel.person_id == pid).first()
+            existing_images = []
+            if person:
+                for img in person.images:
+                    if not img.is_active:
+                        continue
+                    if not img.image_path or not os.path.exists(img.image_path):
+                        continue
+                    filename = os.path.basename(img.image_path)
+                    existing_images.append({
+                        "id": img.id,
+                        "image_url": f"/faces/{pid}/{filename}",
+                        "quality_score": round(float(img.quality_score or 0.0), 4),
+                    })
+            matched_person = {
+                "person_id": pid,
+                "name": best_dup.get("name") or (person.name if person else pid),
+                "similarity": round(best_dup_sim, 4),
+                "match_level": match_level,
+                "first_name": person.first_name if person else None,
+                "last_name": person.last_name if person else None,
+                "department": person.department if person else None,
+                "role": person.role if person else None,
+                "phone": person.phone if person else None,
+                "email": person.email if person else None,
+                "existing_images": existing_images[:8],
+                "existing_image_count": len(existing_images),
+            }
+
+        min_pair_sim = min((p["similarity"] for p in pairwise), default=1.0)
+        is_hard_match = match_level == "hard"
+        return {
+            "visitor_ids": unique_ids,
+            "visitor_count": len(unique_ids),
+            "visitors": visitors_info,
+            "pairwise_similarities": pairwise,
+            "min_pairwise_similarity": round(min_pair_sim, 4),
+            "samples_to_transfer": combined_samples,
+            "sample_count": len(combined_samples),
+            "matched_registered_person": matched_person,
+            "match_level": match_level,
+            "can_create_new": not is_hard_match,
+            "can_merge_existing": is_hard_match,
+        }
+
+    def promote_visitors_to_person(
+        self,
+        db: Session,
+        visitor_ids: List[int],
+        first_name: str,
+        last_name: str,
+        department: Optional[str] = None,
+        role: Optional[str] = None,
+        phone: Optional[str] = None,
+        email: Optional[str] = None,
+        notes: Optional[str] = None,
+        merge_into_existing: bool = False,
+        target_person_id: Optional[str] = None,
+        primary_visitor_id: Optional[int] = None,
+    ) -> PersonModel:
+        """Register one or more duplicate visitors as a single registered person."""
+        from app.visitors.visitor_gallery import visitor_gallery
+
+        if not visitor_ids:
+            raise ValueError("No visitors selected for registration.")
+
+        unique_ids: List[int] = []
+        seen = set()
+        for vid in visitor_ids:
+            if vid not in seen:
+                unique_ids.append(vid)
+                seen.add(vid)
+
+        if len(unique_ids) == 1:
+            only = db.query(VisitorModel).filter(VisitorModel.id == unique_ids[0]).first()
+            if only and only.status == 'promoted' and only.promoted_person_id:
+                existing = db.query(PersonModel).filter(
+                    PersonModel.person_id == only.promoted_person_id
+                ).first()
+                if existing:
+                    return existing
+
+        primary_id = primary_visitor_id or unique_ids[0]
+        if primary_id not in unique_ids:
+            unique_ids.insert(0, primary_id)
+        else:
+            unique_ids = [primary_id] + [vid for vid in unique_ids if vid != primary_id]
+
+        visitors_bundle: List[Tuple[VisitorModel, List[VisitorFaceSampleModel], List[np.ndarray]]] = []
+        all_embs: List[np.ndarray] = []
+        codes: List[str] = []
+
+        for vid in unique_ids:
+            visitor = db.query(VisitorModel).filter(VisitorModel.id == vid).first()
+            if not visitor:
+                raise ValueError(f"Visitor ID {vid} not found.")
+            if visitor.status == 'promoted' and visitor.promoted_person_id:
+                if merge_into_existing and target_person_id == visitor.promoted_person_id:
+                    continue
+                raise ValueError(
+                    f"{visitor.visitor_code} is already registered as {visitor.promoted_person_id}."
+                )
+            transferable, emb_list = self._collect_transferable_samples(db, vid, visitor)
+            visitors_bundle.append((visitor, transferable, emb_list))
+            all_embs.extend(emb_list)
+            codes.append(visitor.visitor_code)
+
+        if not visitors_bundle:
+            raise ValueError("No active visitors available to register.")
+
+        best_dup, best_dup_sim, match_level = self._find_duplicate_registered(all_embs)
+        full_name = f"{first_name} {last_name}".strip()
+        codes_label = ", ".join(codes)
+        merge_notes = notes or (
+            f"Merged duplicate visitors: {codes_label}" if len(codes) > 1
+            else f"Promoted from visitor {codes[0]}"
+        )
+
+        # --- Merge into existing registered person ---
+        if merge_into_existing or (best_dup and target_person_id):
+            pid = target_person_id or (best_dup.get("person_id") if best_dup else None)
+            if not pid:
+                raise ValueError("No existing registered person specified for merge.")
+            person = db.query(PersonModel).filter(PersonModel.person_id == pid).first()
+            if not person:
+                raise ValueError(f"Registered person '{pid}' not found.")
+
+            if first_name.strip():
+                person.first_name = first_name.strip()
+            if last_name.strip():
+                person.last_name = last_name.strip()
+            if first_name.strip() or last_name.strip():
+                person.name = full_name or person.name
+            if department:
+                person.department = department
+            if role:
+                person.role = role
+            if phone:
+                person.phone = phone
+            if email:
+                person.email = email
+            if merge_notes:
+                person.notes = (person.notes or "") + f"\n{merge_notes}" if person.notes else merge_notes
+
+            total_added = 0
+            primary_visitor, _, primary_embs = visitors_bundle[0]
+            for visitor, transferable, _ in visitors_bundle:
+                total_added += self._transfer_samples_to_person(
+                    db, person, visitor, transferable, skip_near_duplicate=True
+                )
+                visitor.status = 'promoted'
+                visitor.promoted_person_id = pid
+                try:
+                    visitor_gallery.remove_visitor(visitor.id)
+                except Exception:
+                    pass
+
+            self._link_duplicate_visitors_to_person(
+                db, primary_visitor.id, primary_visitor, pid,
+                primary_embs[0], person.name or full_name
+            )
+            db.commit()
+            db.refresh(person)
+            logger.info(
+                f"[VisitorRepo] Merged {len(visitors_bundle)} visitor(s) [{codes_label}] "
+                f"into existing {person.name} ({pid}) — added {total_added} face sample(s)."
+            )
+            return person
+
+        if match_level == "hard" and best_dup:
+            raise ValueError(
+                f"These visitors already match registered person "
+                f"'{best_dup.get('name')}' ({best_dup.get('person_id')}) "
+                f"at {best_dup_sim*100:.1f}% similarity. "
+                f"Use 'Add photos to existing profile' to merge all selected visitors."
+            )
+
+        now = datetime.now()
+        person_id = f"person_{uuid.uuid4().hex[:8]}"
+        person = PersonModel(
+            person_id=person_id,
+            first_name=first_name,
+            last_name=last_name,
+            name=full_name,
+            department=department,
+            role=role,
+            phone=phone,
+            email=email,
+            notes=merge_notes,
+            registered_at=now,
+            updated_at=now,
+        )
+        db.add(person)
+        db.flush()
+
+        total_added = 0
+        primary_visitor, _, primary_embs = visitors_bundle[0]
+        for idx, (visitor, transferable, _) in enumerate(visitors_bundle):
+            total_added += self._transfer_samples_to_person(
+                db,
+                person,
+                visitor,
+                transferable,
+                skip_near_duplicate=idx > 0,
+            )
+            visitor.status = 'promoted'
+            visitor.promoted_person_id = person_id
+            try:
+                visitor_gallery.remove_visitor(visitor.id)
+            except Exception:
+                pass
+
+        if total_added == 0:
+            db.rollback()
+            raise ValueError("No valid face samples available to seed the registered profile.")
+
+        self._link_duplicate_visitors_to_person(
+            db, primary_visitor.id, primary_visitor, person_id,
+            primary_embs[0], full_name
+        )
+        db.commit()
+        db.refresh(person)
+        logger.info(
+            f"[VisitorRepo] Registered {len(visitors_bundle)} visitor(s) [{codes_label}] "
+            f"as Person {full_name} ({person_id}) with {total_added} face sample(s)."
+        )
+        return person
+
+    def _sync_visitor_to_gallery(self, db: Session, visitor: VisitorModel) -> None:
+        """Rebuild in-memory gallery embeddings for one visitor from DB samples."""
+        from app.core.utils import l2_normalize
+        from app.visitors.visitor_gallery import visitor_gallery
+
+        visitor_gallery.remove_visitor(visitor.id)
+        samples = (
+            db.query(VisitorFaceSampleModel)
+            .filter(VisitorFaceSampleModel.visitor_id == visitor.id)
+            .order_by(VisitorFaceSampleModel.quality_score.desc())
+            .all()
+        )
+        for sample in samples:
+            if not sample.embedding_blob:
+                continue
+            emb = np.frombuffer(sample.embedding_blob, dtype=np.float32)
+            if emb.size != 512:
+                continue
+            visitor_gallery.add_visitor_sample(
+                visitor.id,
+                visitor.visitor_code,
+                emb,
+                sample.snapshot_path or visitor.primary_snapshot_path,
+            )
+
+    def get_merge_preview(self, db: Session, visitor_ids: List[int]) -> Dict[str, Any]:
+        """Preview merging duplicate visitors into one tracking profile (no registration)."""
+        preview = self.get_bulk_promote_preview(db, visitor_ids)
+        preview["action"] = "merge_tracking"
+        return preview
+
+    def merge_visitors_into_one(
+        self,
+        db: Session,
+        visitor_ids: List[int],
+        primary_visitor_id: Optional[int] = None,
+    ) -> VisitorModel:
+        """
+        Merge multiple duplicate visitor profiles into a single active visitor for tracking.
+        Source visitors are marked status=merged and hidden from the active list.
+        """
+        from app.visitors.visitor_gallery import visitor_gallery
+
+        if len(visitor_ids) < 2:
+            raise ValueError("Select at least two visitors to merge for tracking.")
+
+        unique_ids: List[int] = []
+        seen = set()
+        for vid in visitor_ids:
+            if vid not in seen:
+                unique_ids.append(vid)
+                seen.add(vid)
+
+        primary_id = primary_visitor_id or unique_ids[0]
+        if primary_id not in unique_ids:
+            unique_ids.insert(0, primary_id)
+        else:
+            unique_ids = [primary_id] + [vid for vid in unique_ids if vid != primary_id]
+
+        source_ids = [vid for vid in unique_ids if vid != primary_id]
+        primary = db.query(VisitorModel).filter(VisitorModel.id == primary_id).first()
+        if not primary:
+            raise ValueError(f"Primary visitor ID {primary_id} not found.")
+        if primary.status == 'promoted':
+            raise ValueError(f"{primary.visitor_code} is already registered and cannot absorb merges.")
+        if primary.status == 'merged':
+            raise ValueError(f"{primary.visitor_code} was merged into another profile. Pick a different primary.")
+
+        merged_codes: List[str] = []
+        moved_samples = 0
+        moved_sightings = 0
+
+        for sid in source_ids:
+            source = db.query(VisitorModel).filter(VisitorModel.id == sid).first()
+            if not source:
+                raise ValueError(f"Visitor ID {sid} not found.")
+            if source.status == 'promoted':
+                raise ValueError(f"{source.visitor_code} is already registered — use register flow instead.")
+            if source.status == 'merged':
+                raise ValueError(f"{source.visitor_code} is already merged into another visitor.")
+
+            sample_count = (
+                db.query(VisitorFaceSampleModel)
+                .filter(VisitorFaceSampleModel.visitor_id == sid)
+                .update({VisitorFaceSampleModel.visitor_id: primary_id})
+            )
+            moved_samples += sample_count
+
+            sighting_count = (
+                db.query(VisitorSightingModel)
+                .filter(VisitorSightingModel.visitor_id == sid)
+                .update({VisitorSightingModel.visitor_id: primary_id})
+            )
+            moved_sightings += sighting_count
+
+            source_visits = (
+                db.query(VisitorVisitModel)
+                .filter(VisitorVisitModel.visitor_id == sid)
+                .all()
+            )
+            for visit in source_visits:
+                existing = db.query(VisitorVisitModel).filter(
+                    VisitorVisitModel.visitor_id == primary_id,
+                    VisitorVisitModel.date_key == visit.date_key,
+                ).first()
+                if existing:
+                    existing.sighting_count = (existing.sighting_count or 0) + (visit.sighting_count or 0)
+                    if visit.first_seen_at and (
+                        not existing.first_seen_at or visit.first_seen_at < existing.first_seen_at
+                    ):
+                        existing.first_seen_at = visit.first_seen_at
+                    if visit.last_seen_at and (
+                        not existing.last_seen_at or visit.last_seen_at > existing.last_seen_at
+                    ):
+                        existing.last_seen_at = visit.last_seen_at
+                    if existing.first_seen_at and existing.last_seen_at:
+                        existing.duration_seconds = max(
+                            0.0,
+                            (existing.last_seen_at - existing.first_seen_at).total_seconds(),
+                        )
+                    db.delete(visit)
+                else:
+                    visit.visitor_id = primary_id
+
+            primary.sighting_count = (primary.sighting_count or 0) + (source.sighting_count or 0)
+            if source.first_seen_at and (
+                not primary.first_seen_at or source.first_seen_at < primary.first_seen_at
+            ):
+                primary.first_seen_at = source.first_seen_at
+                primary.first_camera_id = source.first_camera_id or primary.first_camera_id
+            if source.last_seen_at and (
+                not primary.last_seen_at or source.last_seen_at > primary.last_seen_at
+            ):
+                primary.last_seen_at = source.last_seen_at
+                primary.last_camera_id = source.last_camera_id or primary.last_camera_id
+
+            source.status = 'merged'
+            source.merged_into_visitor_id = primary_id
+            merged_codes.append(source.visitor_code)
+            visitor_gallery.remove_visitor(sid)
+
+        max_samples = int(getattr(settings, 'VISITOR_MAX_SAMPLES', 6))
+        all_samples = (
+            db.query(VisitorFaceSampleModel)
+            .filter(VisitorFaceSampleModel.visitor_id == primary_id)
+            .order_by(VisitorFaceSampleModel.quality_score.desc())
+            .all()
+        )
+        if len(all_samples) > max_samples:
+            for extra in all_samples[max_samples:]:
+                db.delete(extra)
+            all_samples = all_samples[:max_samples]
+
+        if all_samples:
+            best = all_samples[0]
+            if best.snapshot_path:
+                primary.primary_snapshot_path = best.snapshot_path
+
+        primary.status = 'active'
+        db.commit()
+        db.refresh(primary)
+
+        self._sync_visitor_to_gallery(db, primary)
+
+        logger.info(
+            f"[VisitorRepo] Merged {len(merged_codes)} visitor(s) [{', '.join(merged_codes)}] "
+            f"into {primary.visitor_code} (ID {primary.id}) — "
+            f"{moved_samples} samples, {moved_sightings} sightings combined."
+        )
+        return primary
+
+    @staticmethod
+    def _format_person_or_visitor_url(path: Optional[str]) -> Optional[str]:
+        if not path:
+            return None
+        normalized = str(path).replace("\\", "/")
+        if "storage/visitors/" in normalized:
+            rel = normalized.split("storage/visitors/")[-1]
+            return f"/faces/visitors/{rel}"
+        if "storage/faces/" in normalized:
+            rel = normalized.split("storage/faces/")[-1]
+            return f"/faces/{rel}"
+        if "faces/" in normalized:
+            rel = normalized.split("faces/")[-1]
+            return f"/faces/{rel}"
+        return f"/faces/{os.path.basename(path)}"
 
     def promote_visitor_to_person(
         self,
@@ -472,101 +1265,28 @@ class VisitorRepository:
         role: Optional[str] = None,
         phone: Optional[str] = None,
         email: Optional[str] = None,
-        notes: Optional[str] = None
+        notes: Optional[str] = None,
+        merge_into_existing: bool = False,
+        target_person_id: Optional[str] = None,
+        additional_visitor_ids: Optional[List[int]] = None,
     ) -> PersonModel:
-        """
-        Transactionally promotes an unregistered visitor to a registered PersonModel.
-        Copies high-quality face samples into permanent gallery & FAISS index,
-        updates visitor status to 'promoted', and sets promoted_person_id.
-        """
-        visitor = db.query(VisitorModel).filter(VisitorModel.id == visitor_id).first()
-        if not visitor:
-            raise ValueError(f"Visitor ID {visitor_id} not found.")
-
-        if visitor.status == 'promoted' and visitor.promoted_person_id:
-            existing = db.query(PersonModel).filter(PersonModel.person_id == visitor.promoted_person_id).first()
-            if existing:
-                return existing
-
-        now = datetime.now()
-        person_id = f"person_{uuid.uuid4().hex[:8]}"
-        full_name = f"{first_name} {last_name}".strip()
-
-        # 1. Create registered Person record
-        person = PersonModel(
-            person_id=person_id,
+        """Promotes one visitor (and optional duplicates) into a registered person."""
+        extra = [vid for vid in (additional_visitor_ids or []) if vid != visitor_id]
+        all_ids = [visitor_id] + extra
+        return self.promote_visitors_to_person(
+            db=db,
+            visitor_ids=all_ids,
+            primary_visitor_id=visitor_id,
             first_name=first_name,
             last_name=last_name,
-            name=full_name,
             department=department,
             role=role,
             phone=phone,
             email=email,
-            notes=notes or f"Promoted from visitor {visitor.visitor_code}",
-            registered_at=now,
-            updated_at=now
+            notes=notes,
+            merge_into_existing=merge_into_existing,
+            target_person_id=target_person_id,
         )
-        db.add(person)
-        db.flush()
-
-        # 2. Transfer high-quality face samples
-        person_dir = settings.FACES_DIR / person_id
-        os.makedirs(person_dir, exist_ok=True)
-
-        samples = db.query(VisitorFaceSampleModel).filter(VisitorFaceSampleModel.visitor_id == visitor_id).all()
-        from app.core.faiss_index import faiss_manager
-
-        added_embeddings = []
-        for idx, sample in enumerate(samples):
-            emb_vec = np.frombuffer(sample.embedding_blob, dtype=np.float32)
-
-            dest_filename = f"{person_id}_sample_{idx+1}.jpg"
-            dest_img_path = str(person_dir / dest_filename)
-
-            if sample.snapshot_path and os.path.exists(sample.snapshot_path):
-                import shutil
-                shutil.copy2(sample.snapshot_path, dest_img_path)
-            else:
-                dest_img_path = None
-
-            # Add PersonImage record
-            p_img = PersonImageModel(
-                person_id=person_id,
-                image_path=dest_img_path,
-                quality_score=sample.quality_score,
-                is_active=True,
-                created_at=now,
-                camera_id=sample.camera_id,
-                yaw=sample.yaw,
-                pitch=sample.pitch,
-                blur_score=sample.blur_score
-            )
-            db.add(p_img)
-            db.flush()
-
-            # Add Embedding record
-            emb_model = EmbeddingModel(
-                person_id=person_id,
-                image_id=p_img.id,
-                image_path=dest_img_path,
-                is_active=True,
-                created_at=now
-            )
-            db.add(emb_model)
-            added_embeddings.append(emb_vec)
-
-        # 3. Add vectors to FAISS index
-        for emb_vec in added_embeddings:
-            faiss_manager.add_person_embedding(person_id=person_id, embedding=emb_vec, name=full_name)
-
-        # 4. Update visitor status & FK
-        visitor.status = 'promoted'
-        visitor.promoted_person_id = person_id
-        db.commit()
-        db.refresh(person)
-
-        logger.info(f"[VisitorRepo] Successfully promoted visitor {visitor.visitor_code} to registered Person {full_name} ({person_id}).")
-        return person
 
     def delete_visitor(self, db: Session, visitor_id_or_code: Any) -> bool:
         """Deletes a visitor profile, all associated snapshot files, sightings, and in-memory gallery vectors."""
@@ -616,16 +1336,49 @@ class VisitorRepository:
         except Exception as g_err:
             logger.warning(f"[VisitorRepo] Could not remove visitor {vis_id} from gallery: {g_err}")
 
-        # 3. Delete from DB
+        # 3. Cascade delete matching recognition logs & presence records from DB
+        try:
+            from app.models.db_models import RecognitionLogModel
+            from app.models.presence_models import PersonSessionModel, DailyReportModel
+            v_code = visitor.visitor_code
+            v_code_alt = f"VISITOR_{vis_id:03d}"
+            db.query(RecognitionLogModel).filter(
+                (RecognitionLogModel.person_id == v_code) |
+                (RecognitionLogModel.person_id == v_code_alt) |
+                (RecognitionLogModel.name == v_code)
+            ).delete(synchronize_session=False)
+
+            db.query(PersonSessionModel).filter(
+                (PersonSessionModel.person_id == v_code) | (PersonSessionModel.person_id == v_code_alt)
+            ).delete(synchronize_session=False)
+
+            db.query(DailyReportModel).filter(
+                (DailyReportModel.person_id == v_code) | (DailyReportModel.person_id == v_code_alt)
+            ).delete(synchronize_session=False)
+        except Exception as log_del_err:
+            logger.warning(f"[VisitorRepo] Error deleting recognition/presence logs for {visitor.visitor_code}: {log_del_err}")
+
+        # 4. Delete visitor from DB
         db.delete(visitor)
         db.commit()
-        logger.info(f"[VisitorRepo] Deleted visitor {vis_id} and all associated files.")
+
+        # 5. Reset camera worker track recognitions
+        try:
+            from app.services.camera.camera_registry import camera_registry
+            with camera_registry.lock:
+                for w in camera_registry.workers.values():
+                    if hasattr(w, "orchestrator") and w.orchestrator:
+                        w.orchestrator.reset_track_recognitions()
+        except Exception:
+            pass
+
+        logger.info(f"[VisitorRepo] Deleted visitor {vis_id} and all associated files/logs.")
         return True
 
     def purge_all_visitors(self, db: Session) -> Dict[str, Any]:
         """
         Purges all visitor records, face samples, sighting timelines, on-disk JPEGs, sequence trackers,
-        and resets auto-increment ID counters so new visitors start cleanly with fresh IDs.
+        recognition logs, presence entries, and resets auto-increment ID counters so new visitors start cleanly with fresh IDs.
         """
         import shutil
         from sqlalchemy import text
@@ -638,17 +1391,38 @@ class VisitorRepository:
         # 2. Delete DB records
         db.query(VisitorSightingModel).delete()
         db.query(VisitorFaceSampleModel).delete()
+        try:
+            from app.visitors.models import VisitorVisitModel
+            db.query(VisitorVisitModel).delete()
+        except Exception:
+            pass
+
+        # Cascade delete all visitor recognition logs & presence records
+        try:
+            from app.models.db_models import RecognitionLogModel
+            from app.models.presence_models import PersonSessionModel, DailyReportModel
+            db.query(RecognitionLogModel).filter(
+                (RecognitionLogModel.person_id.like("VISITOR%")) |
+                (RecognitionLogModel.name.like("VISITOR%"))
+            ).delete(synchronize_session=False)
+
+            db.query(PersonSessionModel).filter(PersonSessionModel.person_id.like("VISITOR%")).delete(synchronize_session=False)
+            db.query(DailyReportModel).filter(DailyReportModel.person_id.like("VISITOR%")).delete(synchronize_session=False)
+        except Exception as log_purge_err:
+            logger.warning(f"[VisitorRepo] Error purging recognition logs: {log_purge_err}")
+
         db.query(VisitorModel).delete()
         db.commit()
 
+
         # 3. Reset SQLite auto-increment primary key sequences
         try:
-            db.execute(text("DELETE FROM sqlite_sequence WHERE name IN ('visitors', 'visitor_face_samples', 'visitor_sightings')"))
+            db.execute(text("DELETE FROM sqlite_sequence WHERE name IN ('visitors', 'visitor_face_samples', 'visitor_sightings', 'visitor_visits')"))
             db.commit()
         except Exception as seq_err:
             logger.warning(f"[VisitorRepo] Reset sqlite_sequence info: {seq_err}")
 
-        # 4. Remove all files/folders in storage/visitors
+        # 4. Remove all files/folders in storage/visitors and visitor snapshots
         try:
             if settings.VISITORS_DIR.exists():
                 for item in settings.VISITORS_DIR.iterdir():
@@ -659,6 +1433,14 @@ class VisitorRepository:
                             item.unlink()
                         except Exception:
                             pass
+
+            snaps_dir = settings.STORAGE_DIR / "snapshots"
+            if snaps_dir.exists():
+                for snap_f in snaps_dir.glob("snap_VISITOR*"):
+                    try:
+                        snap_f.unlink()
+                    except Exception:
+                        pass
         except Exception as dir_err:
             logger.warning(f"[VisitorRepo] Error cleaning visitors storage directory: {dir_err}")
 
@@ -679,12 +1461,23 @@ class VisitorRepository:
         except Exception as cache_err:
             logger.warning(f"[VisitorRepo] Error flushing visitor memory caches: {cache_err}")
 
+        # 6. Reset camera worker track recognitions across all cameras
+        try:
+            from app.services.camera.camera_registry import camera_registry
+            with camera_registry.lock:
+                for w in camera_registry.workers.values():
+                    if hasattr(w, "orchestrator") and w.orchestrator:
+                        w.orchestrator.reset_track_recognitions()
+        except Exception:
+            pass
+
         logger.info(f"[VisitorRepo] Purged all visitor data: {v_count} visitors, {s_count} samples, {sg_count} sightings.")
         return {
             "purged_visitors": v_count,
             "purged_samples": s_count,
             "purged_sightings": sg_count
         }
+
 
     def purge_visitor_gallery_contamination(self, db: Session) -> Dict[str, int]:
         """

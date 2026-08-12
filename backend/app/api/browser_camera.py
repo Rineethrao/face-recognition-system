@@ -9,6 +9,7 @@ CCTV streams and return bounding boxes + identity for overlay rendering.
 """
 import base64
 import logging
+import threading
 import time
 from typing import Optional, Dict, Any
 
@@ -80,6 +81,46 @@ def _maybe_log_event(camera_id: str, person_id: str, name: str, similarity: floa
     finally:
         db.close()
 
+_browser_track_lock = threading.Lock()
+_browser_tracks: Dict[str, Dict[str, Any]] = {}  # track_id -> {"embedding": np.ndarray, "last_seen": float, "bbox": list}
+_browser_track_counter = 0
+
+def _get_or_create_browser_track(embedding: np.ndarray, bbox: list, camera_id: str) -> str:
+    """Associates incoming face with existing track via embedding similarity, or creates new track."""
+    global _browser_track_counter
+    from app.core.utils import l2_normalize
+    
+    now = time.time()
+    q_norm = l2_normalize(embedding)
+    
+    with _browser_track_lock:
+        stale = [tid for tid, t in _browser_tracks.items() if now - t["last_seen"] > 30.0]
+        for tid in stale:
+            del _browser_tracks[tid]
+            
+        best_track_id = None
+        best_sim = 0.0
+        for tid, t_data in _browser_tracks.items():
+            sim = float(np.dot(q_norm, l2_normalize(t_data["embedding"]).T))
+            if sim > best_sim:
+                best_sim = sim
+                best_track_id = tid
+        
+        if best_track_id and best_sim >= 0.48:
+            _browser_tracks[best_track_id]["embedding"] = embedding
+            _browser_tracks[best_track_id]["last_seen"] = now
+            _browser_tracks[best_track_id]["bbox"] = bbox
+            return best_track_id
+            
+        _browser_track_counter += 1
+        new_id = f"browser_track_{_browser_track_counter}"
+        _browser_tracks[new_id] = {
+            "embedding": embedding,
+            "last_seen": now,
+            "bbox": bbox
+        }
+        return new_id
+
 
 @router.post("/analyze_frame", response_model=APIResponse)
 def analyze_frame(req: FrameAnalyzeRequest):
@@ -147,8 +188,10 @@ def analyze_frame(req: FrameAnalyzeRequest):
                     from app.visitors.face_quality import visitor_quality_evaluator
                     db = SessionLocal()
                     try:
-                        quality_res = visitor_quality_evaluator.evaluate_quality(frame, bbox, landmarks)
-                        track_id = f"browser_track_{idx+1}"
+                        quality_res = visitor_quality_evaluator.evaluate_quality(
+                            frame, bbox, landmarks, det_score=float(face.score)
+                        )
+                        track_id = _get_or_create_browser_track(embedding, bbox, camera_id)
                         vis_res = visitor_manager.resolve_unregistered_track(
                             db=db,
                             camera_id=camera_id,

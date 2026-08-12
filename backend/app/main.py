@@ -458,5 +458,5 @@ class SPAStaticFiles(StaticFiles):
             raise e
 
 frontend_dir = BASE_DIR.parent / "frontend"
-if frontend_dir.exists():
-    app.mount("/", SPAStaticFiles(directory=str(frontend_dir), html=True), name="frontend")
+os.makedirs(frontend_dir, exist_ok=True)
+app.mount("/", SPAStaticFiles(directory=str(frontend_dir), html=True), name="frontend")

@@ -50,8 +50,7 @@ class VisitorIdentityResolver:
         best_cand = candidates[0]
         second_best_sim = candidates[1].composite_score if len(candidates) > 1 else 0.0
 
-        match_high = getattr(settings, 'VISITOR_MATCH_HIGH_THRESHOLD', getattr(settings, 'VISITOR_MATCH_HIGH', 0.46))
-        match_low = getattr(settings, 'VISITOR_MATCH_LOW_THRESHOLD', getattr(settings, 'VISITOR_MATCH_LOW', 0.36))
+        match_high = getattr(settings, 'VISITOR_MATCH_HIGH_THRESHOLD', 0.58)
         required_margin = getattr(settings, 'VISITOR_CANDIDATE_MATCH_MARGIN', 0.015)
 
         # Check HIGH match condition with required margin
@@ -68,12 +67,9 @@ class VisitorIdentityResolver:
                 reason=f"High match ({best_cand.composite_score:.3f} >= {match_high})"
             )
 
-        # Check PENDING / Ambiguous match condition
-        if best_cand.composite_score >= match_low:
-            logger.debug(
-                f"[IdentityResolver] Candidate {best_cand.visitor_code} score {best_cand.composite_score:.4f} "
-                f"or margin {margin:.4f} < req_margin {required_margin:.4f} -> PENDING"
-            )
+        # PENDING: Score >= match_high but margin insufficient (ambiguous between two visitors)
+        match_low = getattr(settings, 'VISITOR_MATCH_LOW_THRESHOLD', 0.45)
+        if best_cand.composite_score >= match_high and margin < required_margin:
             return IdentityResolverResult(
                 decision='PENDING',
                 visitor_id=best_cand.visitor_id,
@@ -81,12 +77,26 @@ class VisitorIdentityResolver:
                 best_similarity=round(best_cand.composite_score, 4),
                 second_best_similarity=round(second_best_sim, 4),
                 match_margin=round(margin, 4),
-                confidence=round(best_cand.composite_score, 4),
+                confidence=round(best_cand.composite_score * 0.7, 4),
                 primary_snapshot_path=best_cand.primary_snapshot_path,
-                reason=f"Ambiguous score ({best_cand.composite_score:.3f} in [{match_low}, {match_high}]) or margin low"
+                reason=f"Ambiguous: score {best_cand.composite_score:.3f} >= {match_high} but margin {margin:.3f} < {required_margin}"
             )
 
-        # LOW match condition (< match_low): No existing visitor match candidate
+        # PENDING: Borderline similarity (between match_low and match_high)
+        if best_cand.composite_score >= match_low:
+            return IdentityResolverResult(
+                decision='PENDING',
+                visitor_id=best_cand.visitor_id,
+                visitor_code=best_cand.visitor_code,
+                best_similarity=round(best_cand.composite_score, 4),
+                second_best_similarity=round(second_best_sim, 4),
+                match_margin=round(margin, 4),
+                confidence=round(best_cand.composite_score * 0.5, 4),
+                primary_snapshot_path=best_cand.primary_snapshot_path,
+                reason=f"Borderline: score {best_cand.composite_score:.3f} between {match_low} and {match_high}"
+            )
+
+        # Score < match_low: No existing visitor match candidate -> Proceed to NEW visitor evaluation
         return IdentityResolverResult(
             decision='NONE',
             best_similarity=round(best_cand.composite_score, 4),
@@ -94,5 +104,6 @@ class VisitorIdentityResolver:
             match_margin=round(margin, 4),
             reason=f"No match (best score {best_cand.composite_score:.3f} < {match_low})"
         )
+
 
 visitor_identity_resolver = VisitorIdentityResolver()

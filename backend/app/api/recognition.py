@@ -74,10 +74,23 @@ def apply_recognition_log_filters(query, date_key: Optional[str] = None, categor
             key_nodash = clean_key
             key_dash = f"{clean_key[:4]}-{clean_key[4:6]}-{clean_key[6:8]}" if len(clean_key) == 8 and clean_key.isdigit() else clean_key
 
-        query = query.filter(
-            (func.strftime("%Y-%m-%d", RecognitionLogModel.timestamp) == key_dash) |
-            (func.strftime("%Y%m%d", RecognitionLogModel.timestamp) == key_nodash)
-        )
+        try:
+            from datetime import datetime, timedelta
+            if "-" in key_dash and len(key_dash) == 10:
+                dt_start = datetime.strptime(key_dash, "%Y-%m-%d")
+            else:
+                dt_start = datetime.strptime(key_nodash, "%Y%m%d")
+            dt_end = dt_start + timedelta(days=1)
+            query = query.filter(
+                RecognitionLogModel.timestamp >= dt_start,
+                RecognitionLogModel.timestamp < dt_end
+            )
+        except Exception:
+            query = query.filter(
+                (func.strftime("%Y-%m-%d", RecognitionLogModel.timestamp) == key_dash) |
+                (func.strftime("%Y%m%d", RecognitionLogModel.timestamp) == key_nodash)
+            )
+
 
     if isinstance(category, str) and category and category.lower() != "all":
         cat = category.lower().strip()

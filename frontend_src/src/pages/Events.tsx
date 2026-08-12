@@ -97,7 +97,10 @@ export function Events() {
     }).catch(console.error)
   }, [])
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (showFullSpinner = false) => {
+    if (showFullSpinner) {
+      setLoading(true)
+    }
     try {
       if (viewMode === 'grouped') {
         const data = await getRecognitionSummaries(search || undefined, selectedDate, category)
@@ -114,11 +117,11 @@ export function Events() {
   }, [viewMode, search, selectedDate, category])
 
   useEffect(() => {
-    setLoading(true)
-    loadData()
-    const interval = setInterval(loadData, 8000)
+    loadData(true)
+    const interval = setInterval(() => loadData(false), 8000)
     return () => clearInterval(interval)
   }, [loadData])
+
 
   const loadPersonHistory = async (personId: string) => {
     if (personEvents[personId]?.length) return
